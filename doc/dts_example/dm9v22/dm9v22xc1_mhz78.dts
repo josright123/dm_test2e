@@ -1,0 +1,56 @@
+/*
+ * Device tree overlay for DM9051 SPI Ethernet device
+ */
+ 
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+	
+	/* spi0.1 = SPI bus unit address 1 */
+	//fragment@0 {
+		//target = <&spidev1>; //target = <0xffffffff>
+		//__overlay__ {
+		//	status = "disabled";
+		//};
+	//};
+	
+	//fragment@1
+	fragment@0 {
+		target = <&spi0>; //target = <0xffffffff>
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			
+			/* spi0.1 = SPI bus unit address 1 */
+			//spi_01: dm9051@1
+			dm9051@1 {
+				compatible = "davicom,dm9051";
+				interrupt-parent = <&gpio>; //interrupt-parent = <0xffffffff>
+				interrupts = <26 8>;
+				reg = <1>;
+				spi-max-frequency = <7800000>;
+			};
+		};
+	};
+	fragment@1 {
+		target = <&gpio>; //target = <0xffffffff>
+		__overlay__ {
+			//gpio_pin: gpio_pin
+			gpio_pin {
+				brcm,pins = <26>;
+				brcm,function = <0>; // in
+				brcm,pull = <0>;
+			};
+		};
+	};
+	
+	/* for, dtoverlay, parameters */
+//	__overrides__ {
+//		interrupt = <&spi_01>, "interrupts:0",
+//			  <&gpio_pin>, "brcm,pins:0";
+//		speed     = <&spi_01>, "spi-max-frequency:0";
+//	};
+};
