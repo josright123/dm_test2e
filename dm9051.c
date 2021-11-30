@@ -40,7 +40,7 @@
 
 #define	DRV_PRODUCT_NAME	"dm9051"
 #define	DRV_VERSION_CODE	DM_VERSION(5, 0, 3)			//(VER5.0.0= 0x050000)
-#define	DRV_VERSION_DATE	"20211110b"					//(update)"
+#define	DRV_VERSION_DATE	"20211201b"					//(update)"
 
 /* spi-spi_sync, low level code */
 static int burst_xfer(struct board_info *db, u8 cmdphase, u8 *txb, u8 *rxb, unsigned int len)
@@ -991,4 +991,3 @@ module_spi_driver(dm9051_driver);
 MODULE_AUTHOR("Joseph CHANG <joseph_chang@davicom.com.tw>");
 MODULE_DESCRIPTION("Davicom DM9051 network SPI driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("spi:dm9051");
