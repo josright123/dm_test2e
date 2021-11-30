@@ -38,9 +38,15 @@
 
 #include "dm9051.h"
 
+#define CAST_CONF_SUPP		1 //Enable to have config extra coerce source code
+
+#if CAST_CONF_SUPP
+  #include "dm_conf/conf_ver.h"						//[Parameters config ver]
+#endif
+
 #define	DRV_PRODUCT_NAME	"dm9051"
-#define	DRV_VERSION_CODE	DM_VERSION(5, 0, 3)			//(VER5.0.0= 0x050000)
-#define	DRV_VERSION_DATE	"20211110b"					//(update)"
+#define	DRV_VERSION_CODE	DM_VERSION(5, 0, 5)			//(VER5.0.0= 0x050000)
+#define	DRV_VERSION_DATE	"20211125"					//(update)"
 
 /* spi-spi_sync, low level code */
 static int burst_xfer(struct board_info *db, u8 cmdphase, u8 *txb, u8 *rxb, unsigned int len)
@@ -675,6 +681,12 @@ static int dm_opencode_receiving(struct net_device *ndev, struct board_info *db)
 	return 0;
 }
 
+#if CAST_CONF_SUPP
+  #if CONF_VER & DM_VER_DEBUG
+  #include "dm_conf/conf_debug.c"					//[Use debug_version]
+  #endif
+#endif
+
 #define int_sched_xmit(db) schedule_delayed_work(&(db)->tx_work, 0)
 static void int_tx_delay(struct work_struct *w)
 {
@@ -736,6 +748,12 @@ static void dm_control_objects_init(struct board_info *db)
 	INIT_DELAYED_WORK(&db->setmac_work, int_setmac_delay);
 	INIT_DELAYED_WORK(&db->tx_work, int_tx_delay);
 }
+
+#if CAST_CONF_SUPP
+  #if CONF_VER & DM_VER_NEWINFO_MASK //when not _REL
+  #include "dm_conf/conf_source.c"					//[Use coerces]
+  #endif
+#endif
 
 static void dm9051_init_dm9051(struct net_device *dev)
 {
