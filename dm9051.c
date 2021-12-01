@@ -878,13 +878,15 @@ static void dm_spimsg_addtail(struct board_info *db)
 
 static int dm_chipid_mac_config(struct device *dev, struct net_device *ndev, struct board_info *db)
 {
-	unsigned char *macsrc;
+	//unsigned char *macsrc;
 
 	if (!dm9051_chipid(dev, db))
 		return -ENODEV;
-	macsrc = "eepm";
-	if (!dm9051_read_mac_to_dev(dev, ndev, db))
-		macsrc = "fixed2chip";
+		
+	dm9051_read_mac_to_dev(dev, ndev, db);
+	//macsrc = "eepm";
+	//if (!dm9051_read_mac_to_dev(dev, ndev, db))
+		//macsrc = "fixed2chip";
 	return 0;
 }
 
