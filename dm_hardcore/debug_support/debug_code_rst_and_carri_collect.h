@@ -1,0 +1,50 @@
+//20211019
+#define DEBUG_CODE_RST_ANND_CARRI_COLLECT_H
+#define NB_SUPPORT
+
+//
+// NOt KT_xxx
+// {OT_xxx instead, means Overtake}
+// {TO_xxx instead, means Takeover}
+//
+
+#define DM9051_TEST_PHY_MDI			0x01
+#define DM9051_TEST_ATCR			0x02
+
+#define DM9051_TEST_SPIBCR			0x10
+
+#define DM9051_TESTDISP_LCR			0x40
+#define DM9051_TESTDISP_INTCR			0x80
+	
+#define DM9051_TEST_MEM				0x0100	//Only can valid into '_DM9051_TST_WRFLGS'
+#define DM9051_RELDISP_SPEED			0x2000	//Only for DM_VER_REL to display spi max-speed-hz
+		//
+		// Collection flags
+		//	_DM9051_TST_WRFLGS = 		(DM9051_TEST_PHY_MDI | DM9051_TEST_ATCR | DM9051_TEST_SPIBCR |
+		//						DM9051_TESTDISP_LCR | DM9051_TESTDISP_INTCR) | DM9051_TEST_MEM
+		//
+	//.#define DM9051_TST_WRFLGS			(DM9051_TEST_PHY_MDI | DM9051_TESTDISP_LCR | DM9051_TESTDISP_INTCR)
+	//.#define DM9051_TST_WRFLGS			(DM9051_TESTDISP_LCR | DM9051_TESTDISP_INTCR)
+	#define DM9051_TST_WRFLGS			(DM9051_TESTDISP_LCR)
+		//
+		// Collection flags
+		//	_DM9051_TST_DISP_ALL = 		(DM9051_TEST_PHY_MDI | DM9051_TEST_ATCR | DM9051_TEST_SPIBCR | 
+		//						DM9051_TESTDISP_LCR | DM9051_TESTDISP_INTCR)
+		//
+	//.#define DM9051_TST_DISP_ALL			(DM9051_TEST_PHY_MDI | DM9051_TESTDISP_LCR | DM9051_TESTDISP_INTCR | DM9051_RELDISP_SPEED)
+	//.#define DM9051_TST_DISP_ALL			(DM9051_TESTDISP_LCR | DM9051_TESTDISP_INTCR)
+	//#define DM9051_TST_DISP_ALL			(DM9051_TEST_PHY_MDI | DM9051_TESTDISP_LCR | DM9051_TESTDISP_INTCR)
+	#define DM9051_TST_DISP_ALL			(DM9051_TEST_PHY_MDI | DM9051_RELDISP_SPEED)
+	
+	//#define KT_LINK
+#ifndef KT_LINK
+	//"carrier"
+	//new-add (KT_LINK_DEBUG_READ)
+		
+	//#define KT_LINK_DEBUG_READ		//KT and can peek some
+
+	//"of_dm_carrier.h"=
+	//new-add (DM_CONF_EXPLICITY_LINK_DEBUG_READ) define localize carrier explicity 
+		
+	#define	DM_CONF_EXPLICITY_LINK_DEBUG_READ//If not KT carrier method, it must be this localize carrier explicity
+#endif
