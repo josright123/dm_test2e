@@ -33,14 +33,15 @@
 #include <linux/irq.h>
 #include <linux/slab.h>
 #include <linux/gpio.h>
+#include <linux/iopoll.h>
 #include <linux/of_gpio.h>
 #include <linux/spi/spi.h>
 
 #include "dm9051.h"
 
 #define	DRV_PRODUCT_NAME	"dm9051"
-#define	DRV_VERSION_CODE	DM_VERSION(5, 0, 3)			//(VER5.0.0= 0x050000)
-#define	DRV_VERSION_DATE	"20211201b"					//(update)"
+#define	DRV_VERSION_CODE	DM_VERSION(5, 0, 5)			//(VER5.0.0= 0x050000)
+#define	DRV_VERSION_DATE	"20211209"				//(update)"
 
 /* spi-spi_sync, low level code */
 static int burst_xfer(struct board_info *db, u8 cmdphase, u8 *txb, u8 *rxb, unsigned int len)
@@ -115,11 +116,12 @@ static int std_write_tx_buf(struct board_info *db, u8 *buff, unsigned int len)
 static int dm_phy_read_func(struct board_info *db, int reg)
 {
 	int ret;
+	u8 check_val;
 
 	iow(db, DM9051_EPAR, DM9051_PHY | reg);
 	iow(db, DM9051_EPCR, EPCR_ERPRR | EPCR_EPOS);
-	while (ior(db, DM9051_EPCR) & EPCR_ERRE)
-		;
+	read_poll_timeout(ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+			  true, db, DM9051_EPCR);
 	iow(db, DM9051_EPCR, 0x0);
 	ret = (ior(db, DM9051_EPDRH) << 8) | ior(db, DM9051_EPDRL);
 	return ret;
@@ -127,12 +129,14 @@ static int dm_phy_read_func(struct board_info *db, int reg)
 
 static void dm_phy_write_func(struct board_info *db, int reg, int value)
 {
+	u8 check_val;
+
 	iow(db, DM9051_EPAR, DM9051_PHY | reg);
 	iow(db, DM9051_EPDRL, value);
 	iow(db, DM9051_EPDRH, value >> 8);
 	iow(db, DM9051_EPCR, EPCR_EPOS | EPCR_ERPRW);
-	while (ior(db, DM9051_EPCR) & EPCR_ERRE)
-		;
+	read_poll_timeout(ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+			  true, db, DM9051_EPCR);
 	iow(db, DM9051_EPCR, 0x0);
 }
 
@@ -140,30 +144,34 @@ static void dm_phy_write_func(struct board_info *db, int reg, int value)
  */
 static void dm_read_eeprom_func(struct board_info *db, int offset, u8 *to)
 {
-	ADDR_LOCK_HEAD_ESSENTIAL(db);
+	u8 check_val;
+
+	mutex_lock(&db->addr_lock);
 	iow(db, DM9051_EPAR, offset);
 	iow(db, DM9051_EPCR, EPCR_ERPRR);
-	while (ior(db, DM9051_EPCR) & EPCR_ERRE)
-		;
+	read_poll_timeout(ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+			  true, db, DM9051_EPCR);
 	iow(db, DM9051_EPCR, 0x0);
 	to[0] = ior(db, DM9051_EPDRL);
 	to[1] = ior(db, DM9051_EPDRH);
-	ADDR_LOCK_TAIL_ESSENTIAL(db);
+	mutex_unlock(&db->addr_lock);
 }
 
 /* Write a word data to SROM
  */
 static void dm_write_eeprom_func(struct board_info *db, int offset, u8 *data)
 {
-	ADDR_LOCK_HEAD_ESSENTIAL(db);
+	u8 check_val;
+
+	mutex_lock(&db->addr_lock);
 	iow(db, DM9051_EPAR, offset);
 	iow(db, DM9051_EPDRH, data[1]);
 	iow(db, DM9051_EPDRL, data[0]);
 	iow(db, DM9051_EPCR, EPCR_WEP | EPCR_ERPRW);
-	while (ior(db, DM9051_EPCR) & EPCR_ERRE)
-		;
+	read_poll_timeout(ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+			  true, db, DM9051_EPCR);
 	iow(db, DM9051_EPCR, 0);
-	ADDR_LOCK_TAIL_ESSENTIAL(db);
+	mutex_unlock(&db->addr_lock);
 }
 
 static int dm9051_phy_read_lock(struct net_device *dev, int phy_reg_unused, int reg)
@@ -171,9 +179,9 @@ static int dm9051_phy_read_lock(struct net_device *dev, int phy_reg_unused, int 
 	int val;
 	struct board_info *db = netdev_priv(dev);
 
-	ADDR_LOCK_HEAD_ESSENTIAL(db);
+	mutex_lock(&db->addr_lock);
 	val = dm_phy_read_func(db, reg);
-	ADDR_LOCK_TAIL_ESSENTIAL(db);
+	mutex_unlock(&db->addr_lock);
 	return val;
 }
 
@@ -181,9 +189,9 @@ static void dm9051_phy_write_lock(struct net_device *dev, int phyaddr_unused, in
 {
 	struct board_info *db = netdev_priv(dev);
 
-	ADDR_LOCK_HEAD_ESSENTIAL(db);
+	mutex_lock(&db->addr_lock);
 	dm_phy_write_func(db, reg, value);
-	ADDR_LOCK_TAIL_ESSENTIAL(db);
+	mutex_unlock(&db->addr_lock);
 }
 
 /* read chip id
@@ -194,32 +202,26 @@ static unsigned int dm9051_chipid(struct device *dev, struct board_info *db)
 
 	chipid = iior(dev, db, DM9051_PIDL);
 	chipid |= (unsigned int)iior(dev, db, DM9051_PIDH) << 8;
-	if (chipid == (DM9051_ID >> 16))
+	if (chipid == DM9051_ID)
 		return chipid;
 	chipid = iior(dev, db, DM9051_PIDL);
 	chipid |= (unsigned int)iior(dev, db, DM9051_PIDH) << 8;
-	if (chipid == (DM9051_ID >> 16))
+	if (chipid == DM9051_ID)
 		return chipid;
-	dev_info(dev, "Read [DM9051_PID] = %04x\n", chipid);
-	dev_info(dev, "Read [DM9051_PID] error!\n");
-	return 0;
-}
-
-static void dm9051_phy_advertise_pausecap_func(struct board_info *db)
-{
-	int phy4 = dm_phy_read_func(db, MII_ADVERTISE); //DBG_20140407
-
-	dm_phy_write_func(db, MII_ADVERTISE, phy4 | ADVERTISE_PAUSE_CAP); // dm95 flow-control RX!
+	dev_dbg(dev, "Read [DM9051_PID] = %04x\n", chipid);
+	dev_dbg(dev, "Read [DM9051_PID] error!\n");
+	return chipid;
 }
 
 static void dm9051_reset(struct board_info *db)
 {
-	mdelay(2); //delay 2 ms any need before NCR_RST (20170510)
+	mdelay(2); //need before NCR_RST
 	ncr_reg_reset(db);
 	mdelay(1);
 	mbd_reg_byte(db);
 	mdelay(1);
-	dm9051_phy_advertise_pausecap_func(db); //essential
+	dm_phy_write_func(db, MII_ADVERTISE, ADVERTISE_PAUSE_CAP |
+			  ADVERTISE_ALL | ADVERTISE_CSMA); //for fcr, essential
 	fcr_reg_enable(db);
 	ppcr_reg_seeting(db);
 	ledcr_reg_setting(db, db->lcr_all);
@@ -228,41 +230,35 @@ static void dm9051_reset(struct board_info *db)
 
 /* ESSENTIAL, ensure rxFifoPoint control, disable/enable the interrupt mask
  */
-static void IMR_DISABLE_LOCK_ESSENTIAL(struct board_info *db)
+static void dm_imr_disable_lock_essential(struct board_info *db)
 {
-	ADDR_LOCK_HEAD_ESSENTIAL(db);
+	mutex_lock(&db->addr_lock);
 	imr_reg_stop(db);
-	ADDR_LOCK_TAIL_ESSENTIAL(db);
+	mutex_unlock(&db->addr_lock);
 }
 
-static void IMR_ENABLE_LOCK_ESSENTIAL(struct board_info *db)
+static void dm_imr_enable_lock_essential(struct board_info *db)
 {
-	ADDR_LOCK_HEAD_ESSENTIAL(db);
+	mutex_lock(&db->addr_lock);
 	imr_reg_start(db, db->imr_all); //exactly ncr-rst then rxp to 0xc00
 	//rcr_reg_start(db, db->rcr_all); //rx enable later
-	ADDR_LOCK_TAIL_ESSENTIAL(db);
+	mutex_unlock(&db->addr_lock);
 }
 
 /* functions process mac address is major from EEPROM
  */
-static int dm9051_read_mac_to_dev(struct device *dev, struct net_device *ndev,
-				  struct board_info *db)
+static void dm9051_read_mac_to_dev(struct device *dev, struct net_device *ndev,
+				   struct board_info *db)
 {
 	int i;
-	u8 mac_fix[ETH_ALEN] = { 0x00, 0x60, 0x6e, 0x90, 0x51, 0xee };
 
 	for (i = 0; i < ETH_ALEN; i++)
 		ndev->dev_addr[i] = ior(db, DM9051_PAR + i);
 	if (!is_valid_ether_addr(ndev->dev_addr)) {
-		for (i = 0; i < ETH_ALEN; i++)
-			iow(db, DM9051_PAR + i, mac_fix[i]);
-		for (i = 0; i < ETH_ALEN; i++)
-			ndev->dev_addr[i] = ior(db, DM9051_PAR + i);
-		dev_info(dev, "dm9 [reg_netdev][%s][chip MAC: %pM (%s)]\n",
-			 ndev->name, ndev->dev_addr, "FIX-1");
-		return 0;
+		eth_hw_addr_random(ndev);
+		dev_dbg(dev, "dm9 [reg_netdev][%s][chip MAC: %pM (%s)]\n",
+			ndev->name, ndev->dev_addr, "FIX-1");
 	}
-	return 1;
 }
 
 /* mac, hash, and rx enable temporarily
@@ -279,7 +275,7 @@ static void dm_set_multicast_list_lock(struct board_info *db)
 		struct netdev_hw_addr *ha;
 
 		db->enter_hash = 0;
-		ADDR_LOCK_HEAD_ESSENTIAL(db);
+		mutex_lock(&db->addr_lock);
 		for (i = 0, oft = DM9051_PAR; i < ETH_ALEN; i++, oft++)
 			iow(db, oft, ndev->dev_addr[i]);
 
@@ -292,12 +288,12 @@ static void dm_set_multicast_list_lock(struct board_info *db)
 
 		if (ndev->flags & IFF_PROMISC) {
 			rcr |= RCR_PRMSC;
-			netdev_info(ndev, "set_multicast rcr |= RCR_PRMSC, rcr= %02x\n", rcr);
+			netdev_dbg(ndev, "set_multicast rcr |= RCR_PRMSC, rcr= %02x\n", rcr);
 		}
 
 		if (ndev->flags & IFF_ALLMULTI) {
 			rcr |= RCR_ALL;
-			netdev_info(ndev, "set_multicast rcr |= RCR_ALLMULTI, rcr= %02x\n", rcr);
+			netdev_dbg(ndev, "set_multicast rcr |= RCR_ALLMULTI, rcr= %02x\n", rcr);
 		}
 
 		/* the multicast address in Hash Table : 64 bits */
@@ -312,7 +308,7 @@ static void dm_set_multicast_list_lock(struct board_info *db)
 		}
 		db->rcr_all = rcr;
 		rcr_reg_start(db, db->rcr_all);
-		ADDR_LOCK_TAIL_ESSENTIAL(db);
+		mutex_unlock(&db->addr_lock);
 	}
 }
 
@@ -326,26 +322,24 @@ static void dm_set_mac_lock(struct board_info *db)
 		int i, oft;
 
 		db->enter_setmac = 0;
-		netdev_info(ndev, "set_mac_address %02x %02x %02x  %02x %02x %02x\n",
-			    ndev->dev_addr[0], ndev->dev_addr[1], ndev->dev_addr[2],
-			    ndev->dev_addr[3], ndev->dev_addr[4], ndev->dev_addr[5]);
+		netdev_dbg(ndev, "set_mac_address %pM\n", ndev->dev_addr);
 
 		/* write to net device and chip */
-		ADDR_LOCK_HEAD_ESSENTIAL(db); //mutex_lock
+		mutex_lock(&db->addr_lock);
 		for (i = 0, oft = DM9051_PAR; i < ETH_ALEN; i++, oft++)
 			iow(db, oft, ndev->dev_addr[i]);
-		ADDR_LOCK_TAIL_ESSENTIAL(db); //mutex_unlock
+		mutex_unlock(&db->addr_lock);
 
 		/* write to EEPROM */
 		for (i = 0; i < ETH_ALEN; i += 2)
-			dm_write_eeprom_func(db, i / 2, &ndev->dev_addr[i]);
+			dm_write_eeprom_func(db, i / 2, (u8 *)&ndev->dev_addr[i]);
 	}
 }
 
 /* tables, netdev-ops
  */
 static const struct of_device_id dm9051_match_table[] = {
-	{ .compatible = "davicom,dm9051", }, //=DM_DM_CONF_DTS_COMPATIBLE_USAGE
+	{ .compatible = "davicom,dm9051", },
 	{}
 };
 
@@ -358,7 +352,7 @@ static
 const struct net_device_ops dm9051_netdev_ops = {
 	.ndo_open = dm9051_open,
 	.ndo_stop = dm9051_stop,
-	.ndo_start_xmit = DM9051_START_XMIT,
+	.ndo_start_xmit = dm9051_start_xmit,
 	.ndo_set_rx_mode = dm9051_set_multicast_list_schedule,
 	.ndo_validate_addr = eth_validate_addr,
 	.ndo_set_mac_address = dm9051_set_mac_address,
@@ -390,7 +384,7 @@ static u32 dm9051_get_msglevel(struct net_device *dev)
 	return dm->msg_enable;
 }
 
-static int dm9051_get_link_ksettings(struct net_device *dev, //LNX_KERNEL_v58
+static int dm9051_get_link_ksettings(struct net_device *dev,
 				     struct ethtool_link_ksettings *cmd)
 {
 	struct board_info *dm = to_dm9051_board(dev);
@@ -399,7 +393,6 @@ static int dm9051_get_link_ksettings(struct net_device *dev, //LNX_KERNEL_v58
 	return 0;
 }
 
-/* LNX_KERNEL_v58 */
 static int dm9051_set_link_ksettings(struct net_device *dev,
 				     const struct ethtool_link_ksettings *cmd)
 {
@@ -467,8 +460,8 @@ static int dm9051_set_eeprom(struct net_device *dev,
 static
 const struct ethtool_ops dm9051_ethtool_ops = {
 	.get_drvinfo = dm9051_get_drvinfo,
-	.get_link_ksettings = dm9051_get_link_ksettings, //LNX_KERNEL_v58
-	.set_link_ksettings = dm9051_set_link_ksettings, //LNX_KERNEL_v58
+	.get_link_ksettings = dm9051_get_link_ksettings,
+	.set_link_ksettings = dm9051_set_link_ksettings,
 	.get_msglevel = dm9051_get_msglevel,
 	.set_msglevel = dm9051_set_msglevel,
 	.nway_reset = dm9051_nway_reset,
@@ -487,7 +480,7 @@ static void dm_operation_clear(struct board_info *db)
 	db->enter_setmac = 0;
 }
 
-/* Tips: reset and increase the RST counter
+/* reset and increase the RST counter
  */
 static void dm9051_fifo_reset(u8 state, u8 *hstr, struct board_info *db)
 {
@@ -501,29 +494,27 @@ static void dm9051_reset_dm9051(struct board_info *db, int rxlen)
 	char *sbuff = (char *)db->prxhdr;
 	char hstr[72];
 
-	netdev_info(ndev, "dm9-pkt-Wrong RxLen over-range (%x= %d > %x= %d)\n",
-		    rxlen, rxlen, DM9051_PKT_MAX, DM9051_PKT_MAX);
+	netdev_dbg(ndev, "dm9-pkt-Wrong RxLen over-range (%x= %d > %x= %d)\n",
+		   rxlen, rxlen, DM9051_PKT_MAX, DM9051_PKT_MAX);
 
 	db->bc.large_err_counter++;
 	db->bc.mac_ovrsft_counter++; //increase the MAC over_shift counter
 	dm9051_fifo_reset(11, hstr, db);
 	sprintf(hstr, "dmfifo_reset( 11 RxLenErr ) rxhdr %02x %02x %02x %02x (quick)",
 		sbuff[0], sbuff[1], sbuff[2], sbuff[3]);
-	netdev_info(ndev, "%s\n", hstr);
-	netdev_info(ndev, "dm9 reset-done: of LargeRxLen\n");
-	netdev_info(ndev, " RxLenErr&MacOvrSft_Er %d, RST_c %d\n",
-		    db->bc.mac_ovrsft_counter,
-		    db->bc.DO_FIFO_RST_counter);
+	netdev_dbg(ndev, "%s\n", hstr);
+	netdev_dbg(ndev, " RxLenErr&MacOvrSft_Er %d, RST_c %d\n",
+		   db->bc.mac_ovrsft_counter, db->bc.DO_FIFO_RST_counter);
 }
 
-/* Loop Rx
+/* loop rx
  */
 static int dm9051_lrx(struct board_info *db)
 {
 	struct net_device *ndev = db->ndev;
 	u8 rxbyte;
 	int rxlen;
-	char sbuff[RXHDR_SIZE];
+	char sbuff[DM_RXHDR_SIZE];
 	struct sk_buff *skb;
 	u8 *rdptr;
 	int scanrr = 0;
@@ -535,13 +526,13 @@ static int dm9051_lrx(struct board_info *db)
 			isr_reg_clear_to_stop_mrcmd(db);
 			break; //exhaust-empty
 		}
-		dm9inblk(db, sbuff, RXHDR_SIZE);
+		dm9inblk(db, sbuff, DM_RXHDR_SIZE);
 		isr_reg_clear_to_stop_mrcmd(db);
 
 		db->prxhdr = (struct dm9051_rxhdr *)sbuff;
 		if (db->prxhdr->rxstatus & 0xbf) {
-			netdev_info(ndev, "warn : rxhdr.status 0x%02x\n",
-				    db->prxhdr->rxstatus);
+			netdev_dbg(ndev, "warn : rxhdr.status 0x%02x\n",
+				   db->prxhdr->rxstatus);
 		}
 		if (db->prxhdr->rxlen > DM9051_PKT_MAX) {
 			dm9051_reset_dm9051(db, rxlen);
@@ -551,7 +542,7 @@ static int dm9051_lrx(struct board_info *db)
 		rxlen = db->prxhdr->rxlen;
 		skb = dev_alloc_skb(rxlen + 4);
 		if (!skb) {
-			netdev_info(ndev, "alloc skb size %d fail\n", rxlen + 4);
+			netdev_dbg(ndev, "alloc skb size %d fail\n", rxlen + 4);
 			return scanrr;
 		}
 		skb_reserve(skb, 2);
@@ -574,19 +565,16 @@ static int dm9051_lrx(struct board_info *db)
 	return scanrr;
 }
 
-/* Single Tx
+/* single tx
  */
 static int dm9051_stx(struct board_info *db, u8 *buff, unsigned int len)
 {
-	int ret = 0;
-	int nwait = 0;
+	int ret;
+	u8 check_val;
 
-	/* shorter waiting time JJ20210617 */
-	while ((!(ior(db, DM9051_NSR) & (NSR_TX2END | NSR_TX1END))) && (++nwait < 20))
-		;
-	if (nwait == 20)
-		ret = 1;
-
+	/* shorter waiting time with tx-end check JJ20210617 */
+	ret = read_poll_timeout(ior, check_val, check_val & (NSR_TX2END | NSR_TX1END),
+				1, 20, false, db, DM9051_NSR);
 	dm9outblk(db, buff, len);
 	iow(db, DM9051_TXPLL, len);
 	iow(db, DM9051_TXPLH, len >> 8);
@@ -602,11 +590,11 @@ static int dm9051_send(struct board_info *db)
 	while (!skb_queue_empty(&db->txq)) { //when !empty, JJ20140225
 		struct sk_buff *skb;
 
-		skb = sk_buff_get(db);
+		skb = dm_sk_buff_get(db);
 		if (skb) {
 			ntx++;
 			if (dm9051_stx(db, skb->data, skb->len))
-				netdev_info(ndev, "timeout %d--- WARNING---do-ntx\n", ntx);
+				netdev_dbg(ndev, "timeout %d--- WARNING---do-ntx\n", ntx);
 			ndev->stats.tx_bytes += skb->len;
 			ndev->stats.tx_packets++;
 			dev_kfree_skb(skb); //done
@@ -620,16 +608,13 @@ static void dm_msg_open(struct net_device *ndev)
 	struct board_info *db = netdev_priv(ndev);
 	struct device *dev = &db->spidev->dev;
 
-	snprintf(db->DRV_VERSION, sizeof(db->DRV_VERSION), "%s_V%d.%d.%d.%s",
+	snprintf(db->DRV_VERSION, sizeof(db->DRV_VERSION), "%s_V%d.%d.%d_date_%s",
 		 DRV_PRODUCT_NAME, (DRV_VERSION_CODE >> 16 & 0xff),
 		 (DRV_VERSION_CODE >> 8 & 0xff),
 		 (DRV_VERSION_CODE & 0xff),
 		 DRV_VERSION_DATE);
 	dev_info(dev, "version: %s\n", db->DRV_VERSION);
 }
-
-#define dm_msg_open_done(nd, maddr, irqn) \
-	netdev_info(nd, "[dm_open] %pM irq_no %d ACTIVE_LOW\n", maddr, irqn)
 
 /* end with enable the interrupt mask
  */
@@ -638,24 +623,23 @@ static irqreturn_t dm9051_rx_threaded_irq(int irq, void *pw)
 	struct board_info *db = pw;
 	int nrx;
 
-	DLYWORK_MUTEX_HEAD_ESSENTIAL(db); //mutex_lock
-	IMR_DISABLE_LOCK_ESSENTIAL(db); //set imr disable
+	mutex_lock(&db->spi_lock); //dlywork essential
+	dm_imr_disable_lock_essential(db); //set imr disable
 	if (netif_carrier_ok(db->ndev)) {
-		ADDR_LOCK_HEAD_ESSENTIAL(db);
+		mutex_lock(&db->addr_lock);
 		do {
 			nrx = dm9051_lrx(db);
 			dm9051_send(db); //+ more performance (yes)
 		} while (nrx);
-		ADDR_LOCK_TAIL_ESSENTIAL(db);
+		mutex_unlock(&db->addr_lock);
 	}
-	IMR_ENABLE_LOCK_ESSENTIAL(db); //set imr enable
-	DLYWORK_MUTEX_TAIL_ESSENTIAL(db); //mutex_unlock
+	dm_imr_enable_lock_essential(db); //set imr enable
+	mutex_unlock(&db->spi_lock); //dlywork essential
 	return IRQ_HANDLED;
 }
 
 /* end with enable the interrupt mask
  */
-#define init_sched_phy(db) schedule_delayed_work(&(db)->phy_poll, HZ * 1)
 static int dm_opencode_receiving(struct net_device *ndev, struct board_info *db)
 {
 	int ret;
@@ -669,26 +653,24 @@ static int dm_opencode_receiving(struct net_device *ndev, struct board_info *db)
 		netdev_err(ndev, "failed to get irq\n");
 		return ret;
 	}
-	IMR_ENABLE_LOCK_ESSENTIAL(db);
-	init_sched_phy(db); //sched_start
-	dm_msg_open_done(ndev, ndev->dev_addr, ndev->irq);
+	dm_imr_enable_lock_essential(db);
+	schedule_delayed_work(&db->phy_poll, HZ * 1); //sched_start
+	netdev_info(ndev, "[dm_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, ndev->irq);
 	return 0;
 }
 
-#define int_sched_xmit(db) schedule_delayed_work(&(db)->tx_work, 0)
 static void int_tx_delay(struct work_struct *w)
 {
 	struct delayed_work *dw = to_delayed_work(w);
 	struct board_info *db = container_of(dw, struct board_info, tx_work);
 
-	DLYWORK_MUTEX_HEAD_ESSENTIAL(db); //mutex_lock
-	ADDR_LOCK_HEAD_ESSENTIAL(db);
+	mutex_lock(&db->spi_lock); //dlywork essential
+	mutex_lock(&db->addr_lock);
 	dm9051_send(db);
-	ADDR_LOCK_TAIL_ESSENTIAL(db);
-	DLYWORK_MUTEX_TAIL_ESSENTIAL(db); //mutex_unlock
+	mutex_unlock(&db->addr_lock);
+	mutex_unlock(&db->spi_lock); //dlywork essential
 }
 
-#define int_sched_rxctl(db) schedule_delayed_work(&(db)->rxctrl_work, 0)
 static void int_rxctl_delay(struct work_struct *w)
 {
 	struct delayed_work *dw = to_delayed_work(w);
@@ -697,7 +679,6 @@ static void int_rxctl_delay(struct work_struct *w)
 	dm_set_multicast_list_lock(db);
 }
 
-#define int_sched_setmac(db) schedule_delayed_work(&(db)->setmac_work, 0)
 static void int_setmac_delay(struct work_struct *w)
 {
 	struct delayed_work *dw = to_delayed_work(w);
@@ -706,14 +687,13 @@ static void int_setmac_delay(struct work_struct *w)
 	dm_set_mac_lock(db);
 }
 
-#define pol_sched_phy(db) schedule_delayed_work(&(db)->phy_poll, HZ * 1)
 static void int_phy_poll(struct work_struct *w)
 {
 	struct delayed_work *dw = to_delayed_work(w);
 	struct board_info *db = container_of(dw, struct board_info, phy_poll);
 
 	dm_carrier_poll(db);
-	pol_sched_phy(db);
+	schedule_delayed_work(&db->phy_poll, HZ * 1);
 }
 
 /* Irq free and schedule delays cancel
@@ -754,7 +734,7 @@ static void dm9051_init_display(struct board_info *db)
 
 static void dm_opencode_lock(struct net_device *dev, struct board_info *db)
 {
-	ADDR_LOCK_HEAD_ESSENTIAL(db);  //mutex_lock, Note: must
+	mutex_lock(&db->addr_lock); //Note: must
 	iow(db, DM9051_GPR, 0); //Note: Reg 1F is not set by reset, REG_1F bit0 activate phyxcer
 	mdelay(1); //delay needs for activate phyxcer
 	db->imr_all = IMR_PAR | IMR_PRM;
@@ -762,21 +742,21 @@ static void dm_opencode_lock(struct net_device *dev, struct board_info *db)
 	db->lcr_all = LMCR_MODE1;
 	dm9051_init_dm9051(dev);
 	dm9051_init_display(db);
-	ADDR_LOCK_TAIL_ESSENTIAL(db);  //mutex_unlock
+	mutex_unlock(&db->addr_lock);
 }
 
 static void dm_stopcode_lock(struct board_info *db)
 {
-	ADDR_LOCK_HEAD_ESSENTIAL(db);  //mutex_lock
+	mutex_lock(&db->addr_lock);
 	dm_phy_write_func(db, MII_BMCR, BMCR_RESET); //PHY RESET
 	iow(db, DM9051_GPR, 0x01); //Power-Down PHY
 	rcr_reg_stop(db); //Disable RX
-	ADDR_LOCK_TAIL_ESSENTIAL(db);  //mutex_unlock
+	mutex_unlock(&db->addr_lock);
 }
 
 static void dm_opencode_net(struct net_device *ndev, struct board_info *db)
 {
-	sk_buff_head_init(db); //skb_queue_head_init
+	dm_sk_buff_head_init(db); //skb_queue_head_init
 	netif_start_queue(ndev);
 	netif_wake_queue(ndev);
 	dm_carrier_init(db); //mii_check_
@@ -819,12 +799,12 @@ static int dm9051_stop(struct net_device *ndev)
 
 /* event: play a schedule starter in condition
  */
-static netdev_tx_t DM9051_START_XMIT(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t dm9051_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct board_info *db = netdev_priv(dev);
 
-	sk_buff_set(db, skb); //JJ: a skb add
-	int_sched_xmit(db);
+	dm_sk_buff_set(db, skb); //JJ: a skb add
+	schedule_delayed_work(&db->tx_work, 0);
 	return NETDEV_TX_OK;
 }
 
@@ -835,7 +815,7 @@ static void dm9051_set_multicast_list_schedule(struct net_device *ndev)
 	struct board_info *db = netdev_priv(ndev);
 
 	db->enter_hash = 1;
-	int_sched_rxctl(db);
+	schedule_delayed_work(&db->rxctrl_work, 0);
 }
 
 /* event: NOT play with a schedule starter! will iow() directly.
@@ -848,7 +828,7 @@ static int dm9051_set_mac_address(struct net_device *ndev, void *p)
 	if (ret < 0)
 		return ret;
 	db->enter_setmac = 1;
-	int_sched_setmac(db);
+	schedule_delayed_work(&db->setmac_work, 0);
 	return 0;
 }
 
@@ -876,18 +856,11 @@ static void dm_spimsg_addtail(struct board_info *db)
 	spi_message_add_tail(&db->spi_xfer2[1], &db->spi_msg2);
 }
 
-static int dm_chipid_mac_config(struct device *dev, struct net_device *ndev, struct board_info *db)
+static int dm_chipid_detect(struct device *dev, struct board_info *db)
 {
-	//unsigned char *macsrc;
-
-	if (!dm9051_chipid(dev, db))
-		return -ENODEV;
-		
-	dm9051_read_mac_to_dev(dev, ndev, db);
-	//macsrc = "eepm";
-	//if (!dm9051_read_mac_to_dev(dev, ndev, db))
-		//macsrc = "fixed2chip";
-	return 0;
+	if (dm9051_chipid(dev, db) == DM9051_ID)
+		return 0;
+	return -ENODEV;
 }
 
 static int dm9051_probe(struct spi_device *spi)
@@ -911,11 +884,12 @@ static int dm9051_probe(struct spi_device *spi)
 
 	dm_spimsg_addtail(db);
 	dm_control_objects_init(db); //init_delayed_works
-	ret = dm_chipid_mac_config(dev, ndev, db); //access to dm9051
+	ret = dm_chipid_detect(dev, db); //access to dm9051
 	if (ret) {
-		dev_err(dev, "failed to read chip id\n");
+		dev_err(dev, "chip id error\n");
 		goto err_netdev;
 	}
+	dm9051_read_mac_to_dev(dev, ndev, db);
 	ret = register_netdev(ndev);
 	if (ret) {
 		dev_err(dev, "failed to register network device\n");
@@ -963,7 +937,7 @@ static int dm9051_drv_resume(struct device *dev)
 
 	if (netif_running(ndev)) {
 		dm_opencode_lock(ndev, db);
-		IMR_ENABLE_LOCK_ESSENTIAL(db);
+		dm_imr_enable_lock_essential(db);
 
 		netif_device_attach(ndev);
 		netif_carrier_on(ndev);
