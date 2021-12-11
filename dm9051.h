@@ -1,17 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright 2021 Davicom Semiconductor,Inc.
- *	http://www.davicom.com.tw
- *	2014/03/11  Joseph CHANG  v1.0  Create
- *	2021/10/26  Joseph CHANG  v5.0.1  Update
- *	2021/12/09  Joseph CHANG  v5.0.5  Update
- *
- * DM9051 register definitions
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * Copyright (c) 2021 Davicom Semiconductor,Inc.
+ * Davicom DM9051 SPI Fast Ethernet Linux driver
  */
+
 #ifndef _DM9051_H_
 #define _DM9051_H_
 
@@ -160,11 +152,6 @@ static inline struct board_info *to_dm9051_board(struct net_device *dev)
 	return netdev_priv(dev);
 }
 
-/* Driver information
- */
-#define DM_VERSION(a, b, c)			\
-	(((a) << 16) + ((b) << 8) + (c))
-
 /* carrier
  */
 #define	dm_carrier_init(db)			mii_check_link(&(db)->mii)
@@ -179,11 +166,11 @@ static inline struct board_info *to_dm9051_board(struct net_device *dev)
 
 /* spi transfers
  */
-#define ior					std_spi_read_reg			//info.ior
-#define iior					disp_spi_read_reg			//info.iior
-#define iow					std_spi_write_reg			//info.iow
-#define dm9inblk				std_read_rx_buf_ncpy			//dm.inblk
-#define dm9outblk				std_write_tx_buf			//dm.outblk
+#define ior					std_spi_read_reg			// read reg
+#define iior					disp_spi_read_reg			// read disp
+#define iow					std_spi_write_reg			// write reg
+#define dm9inblk				std_read_rx_buf_ncpy			// read buff
+#define dm9outblk				std_write_tx_buf			// write buf
 
 #define	ncr_reg_reset(db)			iow(db, DM9051_NCR, NCR_RST)		// reset
 #define	mbd_reg_byte(db)			iow(db, DM9051_MBNDRY, MBNDRY_BYTE)	// MemBound
@@ -196,12 +183,6 @@ static inline struct board_info *to_dm9051_board(struct net_device *dev)
 #define imr_reg_start(db, imr_all)		iow(db, DM9051_IMR, imr_all)		// Re-enab
 #define	intcr_reg_setval(db)			iow(db, DM9051_INTCR, INTCR_POL_LOW)	// INTCR
 #define	ledcr_reg_setting(db, lcr_all)		iow(db, DM9051_LMCR, lcr_all)		// LEDMode1
-
-/* display functions skelton
- */
-#define ledcr_wr_disp(db)
-#define	ledcr_reg_disp(db)
-#define dbg_spibcr_peek(db)
 
 /* structure definitions
  */
@@ -231,16 +212,12 @@ struct board_info {
 	struct mutex			addr_lock;	// dm9051's REG lock
 	struct delayed_work		phy_poll;
 	struct delayed_work		rxctrl_work;
-	struct delayed_work		setmac_work;
 	struct delayed_work		tx_work;
-	struct delayed_work		rx_work;
+	u16				hash_table[4];
 	u32				msg_enable ____cacheline_aligned;
 	u8				imr_all;
 	u8				rcr_all;
 	u8				lcr_all;
-	u16				enter_hash;
-	u16				enter_setmac;
-	char				DRV_VERSION[50];
 };
 
 #define	DM_RXHDR_SIZE			sizeof(struct dm9051_rxhdr)
