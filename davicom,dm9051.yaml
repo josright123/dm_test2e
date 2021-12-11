@@ -29,6 +29,10 @@ properties:
   interrupts:
     maxItems: 1
 
+  local-mac-address: true
+
+  mac-address: true
+
 required:
   - compatible
   - reg
@@ -38,14 +42,19 @@ required:
 additionalProperties: false
 
 examples:
+  # Raspberry Pi platform
   - |
     /* for Raspberry Pi with pin control stuff for GPIO irq */
+    #include <dt-bindings/interrupt-controller/irq.h>
+    #include <dt-bindings/gpio/gpio.h>
     spi {
         #address-cells = <1>;
         #size-cells = <0>;
+
         dm9051@0 {
             compatible = "davicom,dm9051";
             reg = <0>; /* spi chip select */
+            local-mac-address = [00 00 00 00 00 00];
             pinctrl-names = "default";
             pinctrl-0 = <&eth_int_pins>;
             interrupt-parent = <&gpio>;
