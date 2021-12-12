@@ -51,21 +51,12 @@ examples:
         #address-cells = <1>;
         #size-cells = <0>;
 
-        dm9051@0 {
+        ethernet@0 {
             compatible = "davicom,dm9051";
             reg = <0>; /* spi chip select */
             local-mac-address = [00 00 00 00 00 00];
-            pinctrl-names = "default";
-            pinctrl-0 = <&eth_int_pins>;
             interrupt-parent = <&gpio>;
             interrupts = <26 IRQ_TYPE_LEVEL_LOW>;
             spi-max-frequency = <31200000>;
-        };
-    };
-    gpio {
-        eth_int_pins {
-            brcm,pins = <26>;
-            brcm,function = <0>; /* in */
-            brcm,pull = <0>; /* none */
         };
     };

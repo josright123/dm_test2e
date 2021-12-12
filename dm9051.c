@@ -180,8 +180,9 @@ static void dm9051_phy_write_lock(struct net_device *dev, int phyaddr_unused, in
 
 /* read chip id
  */
-static unsigned int dm9051_chipid(struct device *dev, struct board_info *db)
+static unsigned int dm9051_chipid(struct board_info *db)
 {
+	struct device *dev = &db->spidev->dev;
 	unsigned int chipid;
 
 	chipid = iior(dev, db, DM9051_PIDL);
@@ -230,18 +231,21 @@ static void dm_imr_enable_lock_essential(struct board_info *db)
 
 /* functions process mac address is major from EEPROM
  */
-static void dm9051_read_mac_to_dev(struct device *dev, struct net_device *ndev,
-				   struct board_info *db)
+static void dm9051_read_mac_to_dev(struct net_device *ndev, struct board_info *db)
 {
+	u8 addr[ETH_ALEN];
 	int i;
 
 	for (i = 0; i < ETH_ALEN; i++)
-		ndev->dev_addr[i] = ior(db, DM9051_PAR + i);
-	if (!is_valid_ether_addr(ndev->dev_addr)) {
-		eth_hw_addr_random(ndev);
-		dev_dbg(dev, "dm9 [reg_netdev][%s][chip MAC: %pM (%s)]\n",
-			ndev->name, ndev->dev_addr, "FIX-1");
+		addr[i] = ior(db, DM9051_PAR + i);
+
+	if (is_valid_ether_addr(addr)) {
+		eth_hw_addr_set(ndev, addr);
+		return;
 	}
+
+	eth_hw_addr_random(ndev);
+	dev_dbg(&db->spidev->dev, "Use random MAC address\n");
 }
 
 /* set mac permanently
@@ -787,9 +791,9 @@ static void dm_spimsg_addtail(struct board_info *db)
 	spi_message_add_tail(&db->spi_xfer2[1], &db->spi_msg2);
 }
 
-static int dm_chipid_detect(struct device *dev, struct board_info *db)
+static int dm_chipid_detect(struct board_info *db)
 {
-	if (dm9051_chipid(dev, db) == DM9051_ID)
+	if (dm9051_chipid(db) == DM9051_ID)
 		return 0;
 	return -ENODEV;
 }
@@ -815,12 +819,12 @@ static int dm9051_probe(struct spi_device *spi)
 
 	dm_spimsg_addtail(db);
 	dm_control_init(db); /* init_delayed_works */
-	ret = dm_chipid_detect(dev, db);
+	ret = dm_chipid_detect(db);
 	if (ret) {
 		dev_err(dev, "chip id error\n");
 		goto err_netdev;
 	}
-	dm9051_read_mac_to_dev(dev, ndev, db);
+	dm9051_read_mac_to_dev(ndev, db);
 	ret = register_netdev(ndev);
 	if (ret) {
 		dev_err(dev, "failed to register network device\n");
