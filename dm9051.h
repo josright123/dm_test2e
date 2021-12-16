@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2021 Davicom Semiconductor,Inc.
  * Davicom DM9051 SPI Fast Ethernet Linux driver
@@ -181,7 +181,6 @@ struct board_info {
 	u8				imr_all;
 	u8				rcr_all;
 	u8				lcr_all;
-	int				link;
 };
 
 #define	DM_RXHDR_SIZE			sizeof(struct dm9051_rxhdr)
