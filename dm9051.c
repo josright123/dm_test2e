@@ -262,7 +262,7 @@ static void dm9051_restart_phy(struct board_info *db)
 	 * also configure phy advertised pause support
 	 * depend on flow control flags
 	 */
-	dm9051_phy_write(db, 4, 0x01e1);
+	//.dm9051_phy_write(db, 4, 0x01e1);
 	//~dm_phy_start(db);
 	//phy_set_asym_pause(db->phydev, true, true); //db->fl.fc_rx, db->fl.fc_tx
 	phy_set_asym_pause(db->phydev, db->fl.fc_rx, db->fl.fc_tx);
@@ -375,16 +375,16 @@ dm9051_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 
 static void dm9051_set_msglevel(struct net_device *dev, u32 value)
 {
-	struct board_info *dm = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(dev);
 
-	dm->msg_enable = value;
+	db->msg_enable = value;
 }
 
 static u32 dm9051_get_msglevel(struct net_device *dev)
 {
-	struct board_info *dm = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(dev);
 
-	return dm->msg_enable;
+	return db->msg_enable;
 }
 
 static int dm9051_get_eeprom_len(struct net_device *dev)
@@ -395,7 +395,7 @@ static int dm9051_get_eeprom_len(struct net_device *dev)
 static int dm9051_get_eeprom(struct net_device *dev,
 			     struct ethtool_eeprom *ee, u8 *data)
 {
-	struct board_info *dm = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(dev);
 	int offset = ee->offset;
 	int len = ee->len;
 	int i;
@@ -406,14 +406,14 @@ static int dm9051_get_eeprom(struct net_device *dev,
 	ee->magic = DM_EEPROM_MAGIC;
 
 	for (i = 0; i < len; i += 2)
-		dm9051_read_eeprom(dm, (offset + i) / 2, data + i);
+		dm9051_read_eeprom(db, (offset + i) / 2, data + i);
 	return 0;
 }
 
 static int dm9051_set_eeprom(struct net_device *dev,
 			     struct ethtool_eeprom *ee, u8 *data)
 {
-	struct board_info *dm = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(dev);
 	int offset = ee->offset;
 	int len = ee->len;
 	int i;
@@ -425,22 +425,56 @@ static int dm9051_set_eeprom(struct net_device *dev,
 		return -EINVAL;
 
 	for (i = 0; i < len; i += 2)
-		dm9051_write_eeprom(dm, (offset + i) / 2, data + i);
+		dm9051_write_eeprom(db, (offset + i) / 2, data + i);
 	return 0;
 }
 
 static void dm9051_get_pauseparam(struct net_device *dev,
 				  struct ethtool_pauseparam *pause)
 {
-	//TBD
+	struct board_info *db = to_dm9051_board(dev);
+
+	pause->rx_pause = db->fl.fc_rx;
+	pause->tx_pause = db->fl.fc_tx;
+	pause->autoneg = db->fl.aneg;
 }
 
 static int dm9051_set_pauseparam(struct net_device *dev,
 				 struct ethtool_pauseparam *pause)
 {
-	//TBD
-	struct board_info *dm = to_dm9051_board(dev);
-	genphy_soft_reset(dm->phydev);
+	struct board_info *db = to_dm9051_board(dev);
+	u8 fcr = 0;
+
+	db->fl.fc_rx = pause->rx_pause;
+	db->fl.fc_tx = pause->tx_pause;
+	db->fl.aneg = pause->autoneg;
+
+	if (pause->autoneg) {
+		//.dm9051_phy_write(db, 4, 0x01e1);
+		db->phydev->autoneg= AUTONEG_ENABLE;
+	} else
+		db->phydev->autoneg= AUTONEG_DISABLE;
+
+	if (pause->rx_pause || pause->tx_pause) {
+		if (pause->rx_pause)
+			fcr |= FCR_BKPM | FCR_FLCE;
+		if (pause->tx_pause)
+			fcr |= FCR_TXPEN;
+		dm9051_iow(db, DM9051_FCR, fcr); /* rx and/or tx FlowCtrl */
+	}
+	else
+		dm9051_iow(db, DM9051_FCR, 0); /* Disable FlowCtrl */
+
+	if (pause->autoneg)
+		printk("[pause->autoneg]\n");
+	else
+		printk("[~pause->autoneg]\n");
+
+	if (pause->rx_pause || pause->tx_pause)
+		printk("flow control enable [fcr] = 0x%02x\n", fcr);
+	else
+		printk("flow control disable [fcr] = %d\n", fcr);
+	//.genphy_soft_reset(db->phydev);
 
 	return 0;
 }
