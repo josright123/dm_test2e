@@ -183,7 +183,6 @@ static int dm9051_mdio_read(struct mii_bus *mdiobus, int phy_id, int reg)
 		mutex_lock(&db->addr_lock);
 		ret = dm9051_phy_read(db, reg, &val);
 		mutex_unlock(&db->addr_lock);
-		if (reg > 3 /*reg!=0 && reg!=1*/) printk("(mdio_rd reg= %d, val= 0x%04x)\n", reg, val);
 		if (ret)
 			return ret;
 		return val;
@@ -201,7 +200,6 @@ static int dm9051_mdio_write(struct mii_bus *mdiobus, int phy_id, int reg, u16 v
 		mutex_lock(&db->addr_lock);
 		ret = dm9051_phy_write(db, reg, val);
 		mutex_unlock(&db->addr_lock);
-		printk("[dm9] mdio_write reg= %d, val= 0x%04x\n", reg, val);
 		if (ret)
 			return ret;
 		return 0;
@@ -218,12 +216,11 @@ static unsigned int dm9051_chipid(struct board_info *db)
 	id = (unsigned int)dm9051_ior(db, DM9051_PIDH) << 8;
 	id |= dm9051_ior(db, DM9051_PIDL);
 	if (id == DM9051_ID) {
-		printk("\n"); dev_info(dev, "dm9051 chipid [....]\n"); //test!! <What write BMCR 0x3900>?guess pwr down!! <How to let phylib AutoNegotiate Restart>?
-		dev_info(dev, "dm9051 chipid [%04x]\n", id);
+		dev_info(dev, "dm9051 chipid %04x\n", id);
 		return id;
 	}
 
-	dev_info(dev, "dm9051 chipid error [error as %04x]\n", id);
+	dev_info(dev, "dm9051 chipid error [as %04x]\n", id);
 	return id;
 }
 
@@ -248,45 +245,11 @@ static void dm9051_restart_fifo_rst(struct board_info *db)
 
 static void dm9051_restart_phy(struct board_info *db)
 {
-	/* init flow control flags */
-	db->fl.fc_rx = true;
-	db->fl.fc_tx = true;
-	db->fl.aneg = AUTONEG_ENABLE; //true;
-
-	/* We may have start with auto negotiation */
-	db->phydev->autoneg= AUTONEG_ENABLE;
-	db->phydev->speed= 0;
-	db->phydev->duplex= 0;
-
-	/* support pause with mac,
-	 * also configure phy advertised pause support
-	 * depend on flow control flags
-	 */
-	//.dm9051_phy_write(db, 4, 0x01e1);
-	//~dm_phy_start(db);
-	//phy_set_asym_pause(db->phydev, true, true); //db->fl.fc_rx, db->fl.fc_tx
+	/* configure phy advertised pause support */
 	phy_set_asym_pause(db->phydev, db->fl.fc_rx, db->fl.fc_tx);
-	//x.db->phydev->state = PHY_UP;
 	phy_start(db->phydev);
-	//x.genphy_soft_reset(db->phydev);
-	//.phy_start_aneg(db->phydev);
-#if 0
-	genphy_restart_aneg(db->phydev); /* re-start auto-nego */
-	genphy_check_and_restart_aneg(db->phydev, db->fl.aneg); //test
-	// if (.set_pauseparam)
-	// __genphy_config_aneg(db->phydev, true);
-	//
-	//	phy_config_aneg(phydev)
-	//		--> 1. if (phydev->drv->config_aneg) return phydev->drv->config_aneg(phydev);
-	//		--> 2. genphy_config_aneg(phydev) = __genphy_config_aneg(phydev, false);
-	//
-	// genphy_aneg_done(db->phydev);
-	// genphy_update_link(db->phydev);
-#endif
 }
 
-/* handle link change
- */
 static void dm9051_handle_link_change(struct net_device *ndev)
 {
 	/* MAC and phy are integrated together, such as link state, speed,
@@ -337,7 +300,7 @@ static void dm9051_mac_addr_set(struct net_device *ndev, struct board_info *db)
 		addr[i] = dm9051_ior(db, DM9051_PAR + i);
 
 	if (is_valid_ether_addr(addr)) {
-		memcpy(ndev->dev_addr, addr, 6); //eth_hw_addr_set(ndev, addr);
+		eth_hw_addr_set(ndev, addr);
 		return;
 	}
 
@@ -449,10 +412,9 @@ static int dm9051_set_pauseparam(struct net_device *dev,
 	db->fl.fc_tx = pause->tx_pause;
 	db->fl.aneg = pause->autoneg;
 
-	if (pause->autoneg) {
-		//.dm9051_phy_write(db, 4, 0x01e1);
+	if (pause->autoneg)
 		db->phydev->autoneg= AUTONEG_ENABLE;
-	} else
+	else
 		db->phydev->autoneg= AUTONEG_DISABLE;
 
 	if (pause->rx_pause || pause->tx_pause) {
@@ -464,17 +426,6 @@ static int dm9051_set_pauseparam(struct net_device *dev,
 	}
 	else
 		dm9051_iow(db, DM9051_FCR, 0); /* Disable FlowCtrl */
-
-	if (pause->autoneg)
-		printk("[pause->autoneg]\n");
-	else
-		printk("[~pause->autoneg]\n");
-
-	if (pause->rx_pause || pause->tx_pause)
-		printk("flow control enable [fcr] = 0x%02x\n", fcr);
-	else
-		printk("flow control disable [fcr] = %d\n", fcr);
-	//.genphy_soft_reset(db->phydev);
 
 	return 0;
 }
@@ -501,7 +452,7 @@ static void dm9051_operation_clear(struct board_info *db)
 	db->bc.DO_FIFO_RST_counter = 0;
 }
 
-/* reset and increase the RST counter
+/* reset while rx error found
  */
 static void dm9051_restart_dm9051(struct board_info *db)
 {
@@ -603,6 +554,7 @@ static int dm9051_single_tx(struct board_info *db, u8 *buff, unsigned int len)
 		netdev_err(db->ndev, "timeout transmit packet\n");
 		return ret;
 	}
+
 	dm9051_outblk(db, buff, len);
 	dm9051_iow(db, DM9051_TXPLL, len);
 	dm9051_iow(db, DM9051_TXPLH, len >> 8);
@@ -649,6 +601,7 @@ static irqreturn_t dm9051_rx_threaded_irq(int irq, void *pw)
 	}
 	dm9051_imr_enable_lock_essential(db); /* set imr enable */
 	mutex_unlock(&db->spi_lock); /* mutex essential */
+
 	return IRQ_HANDLED;
 }
 
@@ -731,6 +684,16 @@ static void dm9051_initcode_lock(struct net_device *dev, struct board_info *db)
 	db->rcr_all = RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN;
 	db->lcr_all = LMCR_MODE1;
 
+	/* init flow control flags */
+	db->fl.fc_rx = true;
+	db->fl.fc_tx = true;
+	db->fl.aneg = AUTONEG_ENABLE;
+
+	/* We may have start with auto negotiation */
+	db->phydev->autoneg= AUTONEG_ENABLE;
+	db->phydev->speed= 0;
+	db->phydev->duplex= 0;
+
 	mutex_lock(&db->addr_lock); /* Note: must */
 
 	dm9051_iow(db, DM9051_GPR, 0); /* REG_1F bit0 activate phyxcer */
@@ -744,7 +707,7 @@ static void dm9051_initcode_lock(struct net_device *dev, struct board_info *db)
 	/* phy mdiobus phy read/write is enclose with mutex_lock/mutex_unlock */
 	phy_support_asym_pause(db->phydev); /* Enable support of asym pause */
 	dm9051_restart_phy(db);
-	phy_attached_info(db->phydev); //again
+	phy_attached_info(db->phydev);
 }
 
 static void dm9051_stopcode_lock(struct board_info *db)
@@ -775,12 +738,6 @@ static int dm9051_open(struct net_device *ndev)
 		return ret;
 
 	dm9051_initcode_lock(ndev, db);
-	//.mutex_lock(&db->addr_lock);
-	//.dm9051_iow(db, DM9051_IMR, IMR_PAR); /* Disabe All */
-	//.mutex_unlock(&db->addr_lock);
-
-	//dm9051_restart_phy(db);//dm_phy_start(db);
-
 	dm9051_imr_enable_lock_essential(db);
 	return 0;
 }
@@ -977,8 +934,6 @@ static int dm9051_probe(struct spi_device *spi)
 		dev_err(dev, "failed to register network device\n");
 		goto err_netdev;
 	}
-
-	//.netif_info(db, probe, ndev, "%s %s registered\n", dev_driver_string(&spi->dev), dev_name(&spi->dev)); //no any show.
 
 	return 0;
 
