@@ -136,15 +136,14 @@
  */
 #define DM9051_PHY_ID		1	/* PHY id */
 #define DM9051_PHY		0x40	/* PHY address 0x01 */
-#define DM9051_PHY_NULLVALUE	0xffff	/* PHY null value for read error */
 #define DM9051_PKT_RDY		0x01	/* Packet ready to receive */
 #define DM9051_PKT_MAX		1536	/* Received packet max size */
 #define DM_EEPROM_MAGIC		(0x9051)
 #define DM9051_EEPROM_NULLVALUE	0xffff	/* EEPROM null value for read error */
 
-static inline struct board_info *to_dm9051_board(struct net_device *dev)
+static inline struct board_info *to_dm9051_board(struct net_device *ndev)
 {
-	return netdev_priv(dev);
+	return netdev_priv(ndev);
 }
 
 /* structure definitions
@@ -153,6 +152,12 @@ struct rx_ctl_mach {
 	u16				large_err_counter;  /* The error of 'Large Err' */
 	u16				mac_ovrsft_counter;  /* The error of 'MacOvrSft_Er' */
 	u16				DO_FIFO_RST_counter; /* The counter of 'fifo_reset' */
+};
+
+struct flow_ctl_tag {
+	bool				fc_rx;  /* flow control rx */
+	bool				fc_tx;  /* flow control tx */
+	bool				aneg;  /* flow control auto negotiation */
 };
 
 struct dm9051_rxhdr {
@@ -166,6 +171,7 @@ struct board_info {
 	struct spi_transfer		spi_xfer2[2] ____cacheline_aligned;
 	struct spi_message		spi_msg2 ____cacheline_aligned;
 	struct rx_ctl_mach		bc ____cacheline_aligned;
+	struct flow_ctl_tag		fl ____cacheline_aligned;
 	struct dm9051_rxhdr		*prxhdr ____cacheline_aligned;
 	struct spi_device		*spidev;
 	struct net_device		*ndev;

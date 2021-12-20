@@ -28,12 +28,12 @@
 
 /* spi low level code */
 static int
-dm9051_xfer(struct board_info *db, u8 cmdphase, u8 *txb, u8 *rxb, unsigned int len)
+dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, unsigned int len)
 {
 	struct device *dev = &db->spidev->dev;
-	int ret = 0;
+	int ret;
 
-	db->cmd[0] = cmdphase;
+	db->cmd[0] = cmd;
 	db->spi_xfer2[0].tx_buf = &db->cmd[0];
 	db->spi_xfer2[0].rx_buf = NULL;
 	db->spi_xfer2[0].len = 1;
@@ -48,15 +48,18 @@ dm9051_xfer(struct board_info *db, u8 cmdphase, u8 *txb, u8 *rxb, unsigned int l
 	}
 	ret = spi_sync(db->spidev, &db->spi_msg2);
 	if (ret < 0)
-		dev_err(dev, "dm9Err spi burst cmd 0x%02x, ret=%d\n", cmdphase, ret);
+		dev_err(dev, "spi burst cmd 0x%02x, ret=%d\n", cmd, ret);
 	return ret;
 }
 
 static u8 dm9051_ior(struct board_info *db, unsigned int reg)
 {
+	int ret;
 	u8 rxb[1];
 
-	dm9051_xfer(db, DM_SPI_RD | reg, NULL, rxb, 1);
+	ret = dm9051_xfer(db, DM_SPI_RD | reg, NULL, rxb, 1);
+	if (ret < 0)
+		return 0xff;
 	return rxb[0];
 }
 
@@ -68,22 +71,29 @@ static void dm9051_iow(struct board_info *db, unsigned int reg, unsigned int val
 	dm9051_xfer(db, DM_SPI_WR | reg, txb, NULL, 1);
 }
 
-static void dm9051_inblk(struct board_info *db, u8 *buff, unsigned int len)
+static int dm9051_inblk(struct board_info *db, u8 *buff, unsigned int len)
 {
+	int ret;
 	u8 txb[1];
 
-	dm9051_xfer(db, DM_SPI_RD | DM_SPI_MRCMD, txb, buff, len);
+	ret = dm9051_xfer(db, DM_SPI_RD | DM_SPI_MRCMD, txb, buff, len);
+	return ret;
+}
+
+static void dm9051_dumpblk(struct board_info *db, unsigned int len)
+{
+	while (len--)
+		dm9051_ior(db, DM_SPI_MRCMD);
 }
 
 static int dm9051_outblk(struct board_info *db, u8 *buff, unsigned int len)
 {
-	dm9051_xfer(db, DM_SPI_WR | DM_SPI_MWCMD, buff, NULL, len);
-	return 0;
+	int ret;
+	ret = dm9051_xfer(db, DM_SPI_WR | DM_SPI_MWCMD, buff, NULL, len);
+	return ret;
 }
 
-/* basic read/write to phy
- */
-static int dm_phy_read(struct board_info *db, int reg)
+static int dm9051_phy_read(struct board_info *db, int reg, int *pvalue)
 {
 	int ret;
 	u8 check_val;
@@ -91,17 +101,17 @@ static int dm_phy_read(struct board_info *db, int reg)
 	dm9051_iow(db, DM9051_EPAR, DM9051_PHY | reg);
 	dm9051_iow(db, DM9051_EPCR, EPCR_ERPRR | EPCR_EPOS);
 	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
-			  true, db, DM9051_EPCR);
+				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0x0);
 	if (ret) {
 		netdev_err(db->ndev, "timeout read phy register\n");
-		return DM9051_PHY_NULLVALUE;
+		return -ETIMEDOUT;
 	}
-	ret = (dm9051_ior(db, DM9051_EPDRH) << 8) | dm9051_ior(db, DM9051_EPDRL);
+	*pvalue = (dm9051_ior(db, DM9051_EPDRH) << 8) | dm9051_ior(db, DM9051_EPDRL);
 	return ret;
 }
 
-static void dm_phy_write(struct board_info *db, int reg, int value)
+static int dm9051_phy_write(struct board_info *db, int reg, int value)
 {
 	int ret;
 	u8 check_val;
@@ -111,10 +121,13 @@ static void dm_phy_write(struct board_info *db, int reg, int value)
 	dm9051_iow(db, DM9051_EPDRH, value >> 8);
 	dm9051_iow(db, DM9051_EPCR, EPCR_EPOS | EPCR_ERPRW);
 	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
-			  true, db, DM9051_EPCR);
+				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0x0);
-	if (ret)
+	if (ret) {
 		netdev_err(db->ndev, "timeout write phy register\n");
+		return -ETIMEDOUT;
+	}
+	return ret;
 }
 
 /* Read a word data from SROM
@@ -128,13 +141,12 @@ static void dm_read_eeprom(struct board_info *db, int offset, u8 *to)
 	dm9051_iow(db, DM9051_EPAR, offset);
 	dm9051_iow(db, DM9051_EPCR, EPCR_ERPRR);
 	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
-			  true, db, DM9051_EPCR);
+				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0x0);
 	if (!ret) {
 		to[0] = dm9051_ior(db, DM9051_EPDRL);
 		to[1] = dm9051_ior(db, DM9051_EPDRH);
-	}
-	else {
+	} else {
 		to[0] = DM9051_EEPROM_NULLVALUE & 0xff;
 		to[1] = DM9051_EEPROM_NULLVALUE >> 8;
 		netdev_err(db->ndev, "timeout read eeprom\n");
@@ -155,7 +167,7 @@ static void dm_write_eeprom(struct board_info *db, int offset, u8 *data)
 	dm9051_iow(db, DM9051_EPDRL, data[0]);
 	dm9051_iow(db, DM9051_EPCR, EPCR_WEP | EPCR_ERPRW);
 	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
-			  true, db, DM9051_EPCR);
+				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0);
 	if (ret)
 		netdev_err(db->ndev, "timeout write eeprom\n");
@@ -165,36 +177,39 @@ static void dm_write_eeprom(struct board_info *db, int offset, u8 *data)
 static int dm9051_mdio_read(struct mii_bus *mdiobus, int phy_id, int reg)
 {
 	struct board_info *db = mdiobus->priv;
-	int val;
+	int val, ret;
 
 	if (phy_id == DM9051_PHY_ID) {
 		mutex_lock(&db->addr_lock);
-		val = dm_phy_read(db, reg);
+		ret = dm9051_phy_read(db, reg, &val);
 		mutex_unlock(&db->addr_lock);
-		if (reg > 3 /*reg!=0 && reg!=1*/) printk("( dm9 mdio_read reg= %d, val= 0x%04x)\n", reg, val);
+		if (reg > 3 /*reg!=0 && reg!=1*/) printk("(mdio_rd reg= %d, val= 0x%04x)\n", reg, val);
+		if (ret)
+			return ret;
 		return val;
 	}
 
-	return DM9051_PHY_NULLVALUE;
+	return 0xffff;
 }
 
 static int dm9051_mdio_write(struct mii_bus *mdiobus, int phy_id, int reg, u16 val)
 {
 	struct board_info *db = mdiobus->priv;
+	int ret;
 
 	if (phy_id == DM9051_PHY_ID) {
 		mutex_lock(&db->addr_lock);
-		dm_phy_write(db, reg, val);
+		ret = dm9051_phy_write(db, reg, val);
 		mutex_unlock(&db->addr_lock);
 		printk("[dm9] mdio_write reg= %d, val= 0x%04x\n", reg, val);
+		if (ret)
+			return ret;
 		return 0;
 	}
 
 	return -ENODEV;
 }
 
-/* read chip id
- */
 static unsigned int dm9051_chipid(struct board_info *db)
 {
 	struct device *dev = &db->spidev->dev;
@@ -203,11 +218,12 @@ static unsigned int dm9051_chipid(struct board_info *db)
 	id = (unsigned int)dm9051_ior(db, DM9051_PIDH) << 8;
 	id |= dm9051_ior(db, DM9051_PIDL);
 	if (id == DM9051_ID) {
-		dev_info(dev, "dm9051.id [%04x]\n", id);
+		printk("\n"); dev_info(dev, "dm9051 chipid [....]\n"); //test!! <What write BMCR 0x3900>?guess pwr down!! <How to let phylib AutoNegotiate Restart>?
+		dev_info(dev, "dm9051 chipid [%04x]\n", id);
 		return id;
 	}
 
-	dev_info(dev, "dm9051.id error [error as %04x]\n", id);
+	dev_info(dev, "dm9051 chipid error [error as %04x]\n", id);
 	return id;
 }
 
@@ -220,15 +236,78 @@ static void dm9051_reset(struct board_info *db)
 	mdelay(1);
 }
 
-static void dm9051_fifo_reset(struct board_info *db)
+static void dm9051_restart_fifo_rst(struct board_info *db)
 {
 	db->bc.DO_FIFO_RST_counter++;
-	//dm_phy_write_func(db, MII_ADVERTISE, ADVERTISE_PAUSE_CAP |
-	//		  ADVERTISE_ALL | ADVERTISE_CSMA); /* for fcr, essential */ //devx
+
 	dm9051_iow(db, DM9051_FCR, FCR_FLOW_ENABLE); /* FlowCtrl */
 	dm9051_iow(db, DM9051_PPCR, PPCR_PAUSE_COUNT); /* Pause Pkt Count */
 	dm9051_iow(db, DM9051_LMCR, db->lcr_all); /* LEDMode1 */
 	dm9051_iow(db, DM9051_INTCR, INTCR_POL_LOW); /* INTCR */
+}
+
+static void dm9051_restart_phy(struct board_info *db)
+{
+	/* init flow control flags */
+	db->fl.fc_rx = true;
+	db->fl.fc_tx = true;
+	db->fl.aneg = AUTONEG_ENABLE; //true;
+
+	/* We may have start with auto negotiation */
+	db->phydev->autoneg= AUTONEG_ENABLE;
+	db->phydev->speed= 0;
+	db->phydev->duplex= 0;
+
+	/* support pause with mac,
+	 * also configure phy advertised pause support
+	 * depend on flow control flags
+	 */
+	dm9051_phy_write(db, 4, 0x01e1);
+	//~dm_phy_start(db);
+	//phy_set_asym_pause(db->phydev, true, true); //db->fl.fc_rx, db->fl.fc_tx
+	phy_set_asym_pause(db->phydev, db->fl.fc_rx, db->fl.fc_tx);
+	//x.db->phydev->state = PHY_UP;
+	phy_start(db->phydev);
+	//x.genphy_soft_reset(db->phydev);
+	//.phy_start_aneg(db->phydev);
+#if 0
+	genphy_restart_aneg(db->phydev); /* re-start auto-nego */
+	genphy_check_and_restart_aneg(db->phydev, db->fl.aneg); //test
+	// if (.set_pauseparam)
+	// __genphy_config_aneg(db->phydev, true);
+	//
+	//	phy_config_aneg(phydev)
+	//		--> 1. if (phydev->drv->config_aneg) return phydev->drv->config_aneg(phydev);
+	//		--> 2. genphy_config_aneg(phydev) = __genphy_config_aneg(phydev, false);
+	//
+	// genphy_aneg_done(db->phydev);
+	// genphy_update_link(db->phydev);
+#endif
+}
+
+/* handle link change
+ */
+static void dm_handle_link_change(struct net_device *ndev)
+{
+	/* MAC and phy are integrated together, such as link state, speed,
+	 * and Duplex are sync inside
+	 */
+	phy_print_status(ndev->phydev);
+}
+
+static int dm_phy_connect(struct board_info *db)
+{
+	char phy_id[MII_BUS_ID_SIZE + 3];
+
+	snprintf(phy_id, MII_BUS_ID_SIZE + 3, PHY_ID_FMT,
+		 db->mdiobus->id, DM9051_PHY_ID);
+	db->phydev = phy_connect(db->ndev, phy_id, dm_handle_link_change,
+				 PHY_INTERFACE_MODE_MII);
+
+	if (IS_ERR(db->phydev))
+		return PTR_ERR(db->phydev);
+
+	return 0;
 }
 
 /* ESSENTIAL, ensure rxFifoPoint control, disable/enable the interrupt mask
@@ -236,7 +315,7 @@ static void dm9051_fifo_reset(struct board_info *db)
 static void dm_imr_disable_lock_essential(struct board_info *db)
 {
 	mutex_lock(&db->addr_lock);
-	dm9051_iow(db, DM9051_IMR, IMR_PAR);		/* Disabe All */
+	dm9051_iow(db, DM9051_IMR, IMR_PAR); /* Disabe All */
 	mutex_unlock(&db->addr_lock);
 }
 
@@ -350,7 +429,23 @@ static int dm9051_set_eeprom(struct net_device *dev,
 	return 0;
 }
 
-const struct ethtool_ops dm9051_ethtool_ops = {
+static void dm9051_get_pauseparam(struct net_device *dev,
+				  struct ethtool_pauseparam *pause)
+{
+	//TBD
+}
+
+static int dm9051_set_pauseparam(struct net_device *dev,
+				 struct ethtool_pauseparam *pause)
+{
+	//TBD
+	struct board_info *dm = to_dm9051_board(dev);
+	genphy_soft_reset(dm->phydev);
+
+	return 0;
+}
+
+static const struct ethtool_ops dm9051_ethtool_ops = {
 	.get_drvinfo = dm9051_get_drvinfo,
 	.get_link_ksettings = phy_ethtool_get_link_ksettings,
 	.set_link_ksettings = phy_ethtool_set_link_ksettings,
@@ -361,6 +456,8 @@ const struct ethtool_ops dm9051_ethtool_ops = {
 	.get_eeprom_len = dm9051_get_eeprom_len,
 	.get_eeprom = dm9051_get_eeprom,
 	.set_eeprom = dm9051_set_eeprom,
+	.get_pauseparam = dm9051_get_pauseparam,
+	.set_pauseparam = dm9051_set_pauseparam,
 };
 
 static void dm_operation_clear(struct board_info *db)
@@ -372,25 +469,24 @@ static void dm_operation_clear(struct board_info *db)
 
 /* reset and increase the RST counter
  */
-static void dm9051_chip_reset(struct board_info *db)
-{
-	dm9051_reset(db);
-	dm9051_fifo_reset(db);
-}
-
-static void dm9051_reset_dm9051(struct board_info *db)
+static void dm9051_restart_dm9051(struct board_info *db)
 {
 	struct net_device *ndev = db->ndev;
 	char *sbuff = (char *)db->prxhdr;
-	int rxlen = db->prxhdr->rxlen;
+	int rxlen = le16_to_cpu(db->prxhdr->rxlen);
 
 	netdev_dbg(ndev, "dm9-rxhdr, Large-eror (rxhdr %02x %02x %02x %02x)\n",
 		   sbuff[0], sbuff[1], sbuff[2], sbuff[3]);
 	netdev_dbg(ndev, "dm9-pkt-Wrong, RxLen over-range (%x= %d > %x= %d)\n",
 		   rxlen, rxlen, DM9051_PKT_MAX, DM9051_PKT_MAX);
 
-	db->bc.large_err_counter++;
-	dm9051_chip_reset(db);
+	dm9051_reset(db);
+	dm9051_restart_fifo_rst(db);
+
+	/* phy mdiobus phy read/write is already enclose with mutex_lock/mutex_unlock */
+	mutex_unlock(&db->addr_lock);
+	dm9051_restart_phy(db);
+	mutex_lock(&db->addr_lock);
 
 	netdev_dbg(ndev, " RxLenErr&MacOvrSft_Er %d, RST_c %d\n",
 		   db->bc.large_err_counter + db->bc.mac_ovrsft_counter,
@@ -401,7 +497,7 @@ static int dm9051_loop_rx(struct board_info *db)
 {
 	struct net_device *ndev = db->ndev;
 	u8 rxbyte;
-	int rxlen;
+	int ret, rxlen;
 	char sbuff[DM_RXHDR_SIZE];
 	struct sk_buff *skb;
 	u8 *rdptr;
@@ -411,33 +507,41 @@ static int dm9051_loop_rx(struct board_info *db)
 		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
 		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
 		if (rxbyte != DM9051_PKT_RDY) {
-			dm9051_iow(db, DM9051_ISR, 0xff); /* ClearISR, isr_reg_clear_to_stop_mrcmd */
+			dm9051_iow(db, DM9051_ISR, 0xff); /* Clear ISR, clear to stop mrcmd */
 			break; /* exhaust-empty */
 		}
-		dm9051_inblk(db, sbuff, DM_RXHDR_SIZE);
-		dm9051_iow(db, DM9051_ISR, 0xff); /* ClearISR, isr_reg_clear_to_stop_mrcmd */
+		ret = dm9051_inblk(db, sbuff, DM_RXHDR_SIZE);
+		if (ret < 0)
+			break;
+		dm9051_iow(db, DM9051_ISR, 0xff); /* Clear ISR, clear to stop mrcmd */
 
 		db->prxhdr = (struct dm9051_rxhdr *)sbuff;
+		rxlen = le16_to_cpu(db->prxhdr->rxlen);
+
 		if (db->prxhdr->rxstatus & 0xbf) {
 			netdev_dbg(ndev, "warn : rxhdr.status 0x%02x\n",
 				   db->prxhdr->rxstatus);
 		}
-		if (db->prxhdr->rxlen > DM9051_PKT_MAX) {
-			dm9051_reset_dm9051(db);
+		if (rxlen > DM9051_PKT_MAX) {
+			db->bc.large_err_counter++;
+			dm9051_restart_dm9051(db);
 			return scanrr;
 		}
 
-		rxlen = db->prxhdr->rxlen;
 		skb = dev_alloc_skb(rxlen + 4);
 		if (!skb) {
 			netdev_dbg(ndev, "alloc skb size %d fail\n", rxlen + 4);
+			dm9051_dumpblk(db, rxlen);
 			return scanrr;
 		}
 		skb_reserve(skb, 2);
 		rdptr = (u8 *)skb_put(skb, rxlen - 4);
 
-		dm9051_inblk(db, rdptr, rxlen);
-		dm9051_iow(db, DM9051_ISR, 0xff); /* ClearISR, isr_reg_clear_to_stop_mrcmd */
+		ret = dm9051_inblk(db, rdptr, rxlen);
+		if (ret < 0)
+			break;
+
+		dm9051_iow(db, DM9051_ISR, 0xff); /* Clear ISR, clear to stop mrcmd */
 
 		skb->protocol = eth_type_trans(skb, db->ndev);
 		if (db->ndev->features & NETIF_F_RXCSUM)
@@ -458,7 +562,7 @@ static int dm9051_single_tx(struct board_info *db, u8 *buff, unsigned int len)
 	int ret;
 	u8 check_val;
 
-	/* shorter waiting time with tx-end check */
+	/* shorter by waiting tx-end rather than tx-req */
 	ret = read_poll_timeout(dm9051_ior, check_val, check_val & (NSR_TX2END | NSR_TX1END),
 				1, 20, false, db, DM9051_NSR);
 	if (ret) {
@@ -525,12 +629,13 @@ static int dm_opencode_receiving(struct net_device *ndev, struct board_info *db)
 	ret = request_threaded_irq(spi->irq, NULL, dm9051_rx_threaded_irq,
 				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
 				   ndev->name, db);
+
 	if (ret < 0) {
 		netdev_err(ndev, "failed to get irq\n");
 		return ret;
 	}
 
-	dm_imr_enable_lock_essential(db);
+	netdev_dbg(ndev, "[dm_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, ndev->irq);
 	return 0;
 }
 
@@ -586,92 +691,46 @@ static void dm_control_init(struct board_info *db)
 	INIT_DELAYED_WORK(&db->tx_work, int_tx_delay);
 }
 
-static void dm9051_init_dm9051(struct board_info *db)
+static void dm_initcode_lock(struct net_device *dev, struct board_info *db)
 {
 	db->imr_all = IMR_PAR | IMR_PRM;
 	db->rcr_all = RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN;
 	db->lcr_all = LMCR_MODE1;
 
-	dm9051_chip_reset(db);
-}
-
-static void dm_opencode_lock(struct net_device *dev, struct board_info *db)
-{
 	mutex_lock(&db->addr_lock); /* Note: must */
 
-	dm9051_iow(db, DM9051_GPR, 0); /* Reg 1F is not set by reset, REG_1F bit0 activate phyxcer */
+	dm9051_iow(db, DM9051_GPR, 0); /* REG_1F bit0 activate phyxcer */
 	mdelay(1); /* delay needs for activate phyxcer */
 
-	dm9051_init_dm9051(db);
-
-	dm9051_iow(db, DM9051_IMR, IMR_PAR); /* Disabe All */
+	dm9051_reset(db);
+	dm9051_restart_fifo_rst(db);
 
 	mutex_unlock(&db->addr_lock);
+
+	/* phy mdiobus phy read/write is enclose with mutex_lock/mutex_unlock */
+	phy_support_asym_pause(db->phydev); /* Enable support of asym pause */
+	dm9051_restart_phy(db);
+	phy_attached_info(db->phydev); //again
 }
 
 static void dm_stopcode_lock(struct board_info *db)
 {
 	mutex_lock(&db->addr_lock);
 
-	//dm_phy_write_func(db, MII_BMCR, BMCR_RESET); /* PHY RESET */ //devx
 	dm9051_iow(db, DM9051_GPR, 0x01); /* Power-Down PHY */
 	dm9051_iow(db, DM9051_RCR, RCR_RX_DISABLE);	/* Disable RX */
 
 	mutex_unlock(&db->addr_lock);
 }
 
-/* handle link change
- */
-static void dm_handle_link_change(struct net_device *ndev)
-{
-	phy_print_status(ndev->phydev);
-
-	/*
-	struct phy_device *phydev = ndev->phydev;
-	struct board_info *db = netdev_priv(ndev);
-	if (db->link != phydev->link) {
-		db->link = phydev->link;
-		netdev_dbg(ndev, "dm_handle_link link= %d\n", phydev->link);
-
-		//if (phydev->link)
-		//	netif_carrier_on(ndev); //devx
-		//else
-		//	netif_carrier_off(ndev);
-	}*/
-}
-
-static int dm_phy_connect(struct board_info *db)
-{
-	char phy_id[MII_BUS_ID_SIZE + 3];
-
-	snprintf(phy_id, MII_BUS_ID_SIZE + 3, PHY_ID_FMT,
-		 db->mdiobus->id, DM9051_PHY_ID);
-	db->phydev = phy_connect(db->ndev, phy_id, dm_handle_link_change,
-				 PHY_INTERFACE_MODE_MII);
-
-	if (IS_ERR(db->phydev))
-		return PTR_ERR(db->phydev);
-
-	//db->phydev->irq = PHY_POLL; //devx
-	return 0;
-}
-
-static void dm_phy_start(struct board_info *db)
-{
-	phy_set_asym_pause(db->phydev, true, true);
-	phy_start(db->phydev);
-}
-
 /* Open network device
  * Called when the network device is marked active, such as a user executing
- * 'ifconfig up' on the device.
+ * 'ifconfig up' on the device
  */
 static int dm9051_open(struct net_device *ndev)
 {
-	struct board_info *db = netdev_priv(ndev);
+	struct board_info *db = to_dm9051_board(ndev);
 	int ret;
-
-	dm_opencode_lock(ndev, db);
 
 	skb_queue_head_init(&db->txq);
 	netif_start_queue(ndev);
@@ -681,19 +740,25 @@ static int dm9051_open(struct net_device *ndev)
 	if (ret < 0)
 		return ret;
 
-	dm_phy_start(db);
-	netdev_dbg(ndev, "[dm_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, ndev->irq);
+	dm_initcode_lock(ndev, db);
+	//.mutex_lock(&db->addr_lock);
+	//.dm9051_iow(db, DM9051_IMR, IMR_PAR); /* Disabe All */
+	//.mutex_unlock(&db->addr_lock);
+
+	//dm9051_restart_phy(db);//dm_phy_start(db);
+
+	dm_imr_enable_lock_essential(db); 
 	return 0;
 }
 
 /* Close network device
  * Called to close down a network device which has been active. Cancell any
  * work, shutdown the RX and TX process and then place the chip into a low
- * power state while it is not being used.
+ * power state while it is not being used
  */
 static int dm9051_stop(struct net_device *ndev)
 {
-	struct board_info *db = netdev_priv(ndev);
+	struct board_info *db = to_dm9051_board(ndev);
 
 	phy_stop(db->phydev);
 	dm_stopcode_release(db);
@@ -704,9 +769,9 @@ static int dm9051_stop(struct net_device *ndev)
 
 /* event: play a schedule starter in condition
  */
-static netdev_tx_t dm9051_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t dm9051_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 {
-	struct board_info *db = netdev_priv(dev);
+	struct board_info *db = to_dm9051_board(ndev);
 
 	skb_queue_tail(&db->txq, skb); /* add to skb */
 	schedule_delayed_work(&db->tx_work, 0);
@@ -717,12 +782,12 @@ static netdev_tx_t dm9051_start_xmit(struct sk_buff *skb, struct net_device *dev
  */
 static void dm9051_set_multicast_list_schedule(struct net_device *ndev)
 {
-	struct board_info *db = netdev_priv(ndev);
+	struct board_info *db = to_dm9051_board(ndev);
 	u8 rcr = RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN;
 	struct netdev_hw_addr *ha;
 	u32 hash_val;
 
-	/* rxctl */
+	/* rx control */
 	if (ndev->flags & IFF_PROMISC) {
 		rcr |= RCR_PRMSC;
 		netdev_dbg(ndev, "set_multicast rcr |= RCR_PRMSC, rcr= %02x\n", rcr);
@@ -750,11 +815,11 @@ static void dm9051_set_multicast_list_schedule(struct net_device *ndev)
 	schedule_delayed_work(&db->rxctrl_work, 0);
 }
 
-/* event: NOT play with a schedule starter! will dm9051_iow() directly.
+/* event: write into the mac registers and eeprom directly
  */
 static int dm9051_set_mac_address(struct net_device *ndev, void *p)
 {
-	struct board_info *db = netdev_priv(ndev);
+	struct board_info *db = to_dm9051_board(ndev);
 	int ret = eth_mac_addr(ndev, p);
 
 	if (ret < 0)
@@ -845,7 +910,6 @@ static int dm9051_probe(struct spi_device *spi)
 	SET_NETDEV_DEV(ndev, dev);
 	dev_set_drvdata(dev, ndev);
 	db = netdev_priv(ndev);
-	memset(db, 0, sizeof(struct board_info));
 	db->msg_enable = 0;
 	db->spidev = spi;
 	db->ndev = ndev;
@@ -864,13 +928,13 @@ static int dm9051_probe(struct spi_device *spi)
 	ret = dm_register_mdiobus(db); /* init mdiobus */
 	if (ret) {
 		dev_err(dev, "register mdiobus error\n");
-		goto err_mdiobus;
+		return ret;
 	}
 
 	ret = dm_phy_connect(db); /* phy connect as poll mode */
 	if (ret) {
 		dev_err(dev, "phy connect error\n");
-		goto err_phycnnt;
+		return ret;
 	}
 
 	dm_operation_clear(db);
@@ -880,13 +944,12 @@ static int dm9051_probe(struct spi_device *spi)
 		goto err_netdev;
 	}
 
+	//.netif_info(db, probe, ndev, "%s %s registered\n", dev_driver_string(&spi->dev), dev_name(&spi->dev)); //no any show.
+
 	return 0;
 
 err_netdev:
 	phy_disconnect(db->phydev);
-err_phycnnt:
-err_mdiobus:
-//err_chipid:
 	return ret;
 }
 
@@ -894,7 +957,7 @@ static int dm9051_drv_remove(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
 	struct net_device *ndev = dev_get_drvdata(dev);
-	struct board_info *db = netdev_priv(ndev);
+	struct board_info *db = to_dm9051_board(ndev);
 
 	phy_disconnect(db->phydev);
 	return 0;
