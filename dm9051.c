@@ -716,9 +716,7 @@ static void dm9051_initcode_lock(struct board_info *db)
 static void dm9051_stopcode_lock(struct board_info *db)
 {
 	mutex_lock(&db->addr_lock);
-
 	dm9051_iow(db, DM9051_RCR, RCR_RX_DISABLE); /* Disable RX */
-
 	mutex_unlock(&db->addr_lock);
 }
 
@@ -763,9 +761,8 @@ static int dm9051_open(struct net_device *ndev)
 	dm9051_phyup_lock(db);
 	dm9051_initcode_lock(db);
 
-	/* phy mdiobus phy read/write is enclose with mutex_lock/mutex_unlock */
 	phy_support_sym_pause(db->phydev); /* Enable support of sym pause */
-	phy_start(db->phydev);
+	phy_start(db->phydev); /* phy read/write is enclose with mutex_lock/mutex_unlock */
 
 	dm9051_imr_enable_lock_essential(db);
 	return 0;
@@ -841,10 +838,9 @@ static void dm9051_set_multicast_list_schedule(struct net_device *ndev)
 static int dm9051_set_mac_address(struct net_device *ndev, void *p)
 {
 	struct board_info *db = to_dm9051_board(ndev);
-	int i, oft;
+	int i, oft, ret;
 
-	int ret = eth_mac_addr(ndev, p);
-
+	ret = eth_mac_addr(ndev, p);
 	if (ret < 0)
 		return ret;
 
@@ -971,7 +967,6 @@ static int dm9051_probe(struct spi_device *spi)
 		dev_err(dev, "failed to register network device\n");
 		goto err_netdev;
 	}
-
 	return 0;
 
 err_netdev:
