@@ -89,6 +89,7 @@ static void dm9051_dumpblk(struct board_info *db, unsigned int len)
 static int dm9051_outblk(struct board_info *db, u8 *buff, unsigned int len)
 {
 	int ret;
+
 	ret = dm9051_xfer(db, DM_SPI_WR | DM_SPI_MWCMD, buff, NULL, len);
 	return ret;
 }
@@ -116,6 +117,9 @@ static int dm9051_phy_write(struct board_info *db, int reg, int value)
 	int ret;
 	u8 check_val;
 
+	if (reg == MII_BMCR && !(value & 0x0800))
+		dev_info(&db->spidev->dev, "[phy_write/inline delay..] %d %04x\n", MII_BMCR, value); //printk 
+
 	dm9051_iow(db, DM9051_EPAR, DM9051_PHY | reg);
 	dm9051_iow(db, DM9051_EPDRL, value);
 	dm9051_iow(db, DM9051_EPDRH, value >> 8);
@@ -123,6 +127,10 @@ static int dm9051_phy_write(struct board_info *db, int reg, int value)
 	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0x0);
+
+	if (reg == MII_BMCR && !(value & 0x0800)) /* this is phyup */
+		mdelay(1); /* need for activate phyxcer */
+
 	if (ret) {
 		netdev_err(db->ndev, "timeout write phy register\n");
 		return -ETIMEDOUT;
@@ -235,9 +243,16 @@ static void dm9051_reset(struct board_info *db)
 
 static void dm9051_restart_fifo_rst(struct board_info *db)
 {
+	u8 fcr = 0;
+
 	db->bc.DO_FIFO_RST_counter++;
 
-	dm9051_iow(db, DM9051_FCR, FCR_FLOW_ENABLE); /* FlowCtrl */
+	if (db->fl.fc_rx)
+		fcr |= FCR_BKPM | FCR_FLCE;
+	if (db->fl.fc_tx)
+		fcr |= FCR_TXPEN;
+
+	dm9051_iow(db, DM9051_FCR, fcr); /* init and/or save pause param FlowCtrl */
 	dm9051_iow(db, DM9051_PPCR, PPCR_PAUSE_COUNT); /* Pause Pkt Count */
 	dm9051_iow(db, DM9051_LMCR, db->lcr_all); /* LEDMode1 */
 	dm9051_iow(db, DM9051_INTCR, INTCR_POL_LOW); /* INTCR */
@@ -252,10 +267,32 @@ static void dm9051_restart_phy(struct board_info *db)
 
 static void dm9051_handle_link_change(struct net_device *ndev)
 {
-	/* MAC and phy are integrated together, such as link state, speed,
-	 * and Duplex are sync inside
-	 */
+	struct board_info *db = to_dm9051_board(ndev);
+	u8 fcr = 0;
+	int lcladv, ret;
+
 	phy_print_status(ndev->phydev);
+
+	/* only write pause settings to mac. since mac and phy are integrated
+	 * together, such as link state, speed and duplex are sync already
+	 */
+
+	mutex_lock(&db->addr_lock);
+	ret = dm9051_phy_read(db, MII_ADVERTISE, &lcladv);
+	mutex_unlock(&db->addr_lock);
+	if (ret)
+		return;
+
+	if (lcladv & db->phydev->pause & ADVERTISE_PAUSE_CAP) {
+		db->fl.fc_rx = true;
+		db->fl.fc_tx = true;
+		fcr = FCR_FLOW_ENABLE;
+	}
+
+	mutex_lock(&db->addr_lock);
+	if (dm9051_ior(db, DM9051_FCR) != fcr)
+		dm9051_iow(db, DM9051_FCR, fcr); /* save pause param FlowCtrl */
+	mutex_unlock(&db->addr_lock);
 }
 
 static int dm9051_phy_connect(struct board_info *db)
@@ -289,9 +326,9 @@ static void dm9051_imr_enable_lock_essential(struct board_info *db)
 	mutex_unlock(&db->addr_lock);
 }
 
-/* functions process mac address is major from EEPROM
+/* mac address is major from EEPROM
  */
-static void dm9051_mac_addr_set(struct net_device *ndev, struct board_info *db)
+static void dm9051_init_mac_addr(struct net_device *ndev, struct board_info *db)
 {
 	u8 addr[ETH_ALEN];
 	int i;
@@ -300,7 +337,7 @@ static void dm9051_mac_addr_set(struct net_device *ndev, struct board_info *db)
 		addr[i] = dm9051_ior(db, DM9051_PAR + i);
 
 	if (is_valid_ether_addr(addr)) {
-		eth_hw_addr_set(ndev, addr);
+		memcpy(ndev->dev_addr, addr, 6); //eth_hw_addr_set(ndev, addr);
 		return;
 	}
 
@@ -310,7 +347,7 @@ static void dm9051_mac_addr_set(struct net_device *ndev, struct board_info *db)
 
 /* set mac permanently
  */
-static void dm9051_set_mac_lock(struct board_info *db)
+static void dm9051_write_mac_lock(struct board_info *db)
 {
 	struct net_device *ndev = db->ndev;
 	int i, oft;
@@ -336,16 +373,16 @@ dm9051_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
 	strscpy(info->driver, DRVNAME_9051, sizeof(info->driver));
 }
 
-static void dm9051_set_msglevel(struct net_device *dev, u32 value)
+static void dm9051_set_msglevel(struct net_device *ndev, u32 value)
 {
-	struct board_info *db = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(ndev);
 
 	db->msg_enable = value;
 }
 
-static u32 dm9051_get_msglevel(struct net_device *dev)
+static u32 dm9051_get_msglevel(struct net_device *ndev)
 {
-	struct board_info *db = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(ndev);
 
 	return db->msg_enable;
 }
@@ -355,10 +392,10 @@ static int dm9051_get_eeprom_len(struct net_device *dev)
 	return 128;
 }
 
-static int dm9051_get_eeprom(struct net_device *dev,
+static int dm9051_get_eeprom(struct net_device *ndev,
 			     struct ethtool_eeprom *ee, u8 *data)
 {
-	struct board_info *db = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(ndev);
 	int offset = ee->offset;
 	int len = ee->len;
 	int i;
@@ -373,10 +410,10 @@ static int dm9051_get_eeprom(struct net_device *dev,
 	return 0;
 }
 
-static int dm9051_set_eeprom(struct net_device *dev,
+static int dm9051_set_eeprom(struct net_device *ndev,
 			     struct ethtool_eeprom *ee, u8 *data)
 {
-	struct board_info *db = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(ndev);
 	int offset = ee->offset;
 	int len = ee->len;
 	int i;
@@ -392,20 +429,20 @@ static int dm9051_set_eeprom(struct net_device *dev,
 	return 0;
 }
 
-static void dm9051_get_pauseparam(struct net_device *dev,
+static void dm9051_get_pauseparam(struct net_device *ndev,
 				  struct ethtool_pauseparam *pause)
 {
-	struct board_info *db = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(ndev);
 
 	pause->rx_pause = db->fl.fc_rx;
 	pause->tx_pause = db->fl.fc_tx;
 	pause->autoneg = db->fl.aneg;
 }
 
-static int dm9051_set_pauseparam(struct net_device *dev,
+static int dm9051_set_pauseparam(struct net_device *ndev,
 				 struct ethtool_pauseparam *pause)
 {
-	struct board_info *db = to_dm9051_board(dev);
+	struct board_info *db = to_dm9051_board(ndev);
 	u8 fcr = 0;
 
 	db->fl.fc_rx = pause->rx_pause;
@@ -413,19 +450,20 @@ static int dm9051_set_pauseparam(struct net_device *dev,
 	db->fl.aneg = pause->autoneg;
 
 	if (pause->autoneg)
-		db->phydev->autoneg= AUTONEG_ENABLE;
+		db->phydev->autoneg = AUTONEG_ENABLE;
 	else
-		db->phydev->autoneg= AUTONEG_DISABLE;
+		db->phydev->autoneg = AUTONEG_DISABLE;
 
+	mutex_lock(&db->addr_lock);
 	if (pause->rx_pause || pause->tx_pause) {
 		if (pause->rx_pause)
 			fcr |= FCR_BKPM | FCR_FLCE;
 		if (pause->tx_pause)
 			fcr |= FCR_TXPEN;
-		dm9051_iow(db, DM9051_FCR, fcr); /* rx and/or tx FlowCtrl */
 	}
-	else
-		dm9051_iow(db, DM9051_FCR, 0); /* Disable FlowCtrl */
+	if (dm9051_ior(db, DM9051_FCR) != fcr)
+		dm9051_iow(db, DM9051_FCR, fcr); /* set pause param FlowCtrl */
+	mutex_unlock(&db->addr_lock);
 
 	return 0;
 }
@@ -515,7 +553,6 @@ static int dm9051_loop_rx(struct board_info *db)
 
 		skb = dev_alloc_skb(rxlen + 4);
 		if (!skb) {
-			netdev_dbg(ndev, "alloc skb size %d fail\n", rxlen + 4);
 			dm9051_dumpblk(db, rxlen);
 			return scanrr;
 		}
@@ -684,15 +721,15 @@ static void dm9051_initcode_lock(struct net_device *dev, struct board_info *db)
 	db->rcr_all = RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN;
 	db->lcr_all = LMCR_MODE1;
 
-	/* init flow control flags */
+	/* init pause param FlowCtrl */
 	db->fl.fc_rx = true;
 	db->fl.fc_tx = true;
 	db->fl.aneg = AUTONEG_ENABLE;
 
 	/* We may have start with auto negotiation */
-	db->phydev->autoneg= AUTONEG_ENABLE;
-	db->phydev->speed= 0;
-	db->phydev->duplex= 0;
+	db->phydev->autoneg = AUTONEG_ENABLE;
+	db->phydev->speed = 0;
+	db->phydev->duplex = 0;
 
 	mutex_lock(&db->addr_lock); /* Note: must */
 
@@ -816,7 +853,7 @@ static int dm9051_set_mac_address(struct net_device *ndev, void *p)
 	if (ret < 0)
 		return ret;
 
-	dm9051_set_mac_lock(db);
+	dm9051_write_mac_lock(db);
 	return 0;
 }
 
@@ -914,7 +951,7 @@ static int dm9051_probe(struct spi_device *spi)
 		dev_err(dev, "chip id error\n");
 		return -ENODEV;
 	}
-	dm9051_mac_addr_set(ndev, db);
+	dm9051_init_mac_addr(ndev, db);
 
 	ret = dm9051_register_mdiobus(db); /* init mdiobus */
 	if (ret) {
