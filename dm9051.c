@@ -251,19 +251,10 @@ static void dm9051_restart_fifo_rst(struct board_info *db)
 	if (db->eth_pause.tx_pause)
 		fcr |= FCR_TXPEN;
 
-	//if (dm9051_ior(db, DM9051_FCR) != fcr) //temp 
-		printk("aet _restart_fifo_rst fcr %02x\n", fcr);
-	dm9051_iow(db, DM9051_FCR, fcr); /* init and/or save pause param FlowCtrl */
+	printk("*NOT, aet _restart_fifo_rst fcr, now %02x ------------------ fifo_rst\n", dm9051_ior(db, DM9051_FCR));
 	dm9051_iow(db, DM9051_PPCR, PPCR_PAUSE_COUNT); /* Pause Pkt Count */
 	dm9051_iow(db, DM9051_LMCR, db->lcr_all); /* LEDMode1 */
 	dm9051_iow(db, DM9051_INTCR, INTCR_POL_LOW); /* INTCR */
-}
-
-static void dm9051_restart_phy(struct board_info *db)
-{
-	/* configure phy advertised pause support */
-	phy_set_asym_pause(db->phydev, db->eth_pause.rx_pause ? true : false, db->eth_pause.tx_pause ? true : false);
-	phy_start(db->phydev);
 }
 
 static void dm9051_handle_link_change(struct net_device *ndev)
@@ -506,11 +497,6 @@ static void dm9051_restart_dm9051(struct board_info *db)
 
 	dm9051_reset(db);
 	dm9051_restart_fifo_rst(db);
-
-	/* phy mdiobus phy read/write is already enclose with mutex_lock/mutex_unlock */
-	mutex_unlock(&db->addr_lock);
-	dm9051_restart_phy(db);
-	mutex_lock(&db->addr_lock);
 
 	netdev_dbg(ndev, " RxLenErr&MacOvrSft_Er %d, RST_c %d\n",
 		   db->bc.large_err_counter + db->bc.mac_ovrsft_counter,
@@ -758,7 +744,7 @@ static inline void dm9051_phydown_lock(struct board_info *db)
 	mutex_unlock(&db->addr_lock);
 }
 
-static void dm9051_initcode_lock(struct net_device *dev, struct board_info *db)
+static void dm9051_initcode_lock(struct board_info *db)
 {
 	mutex_lock(&db->addr_lock); /* Note: must */
 
@@ -766,11 +752,6 @@ static void dm9051_initcode_lock(struct net_device *dev, struct board_info *db)
 	dm9051_restart_fifo_rst(db);
 
 	mutex_unlock(&db->addr_lock);
-
-	/* phy mdiobus phy read/write is enclose with mutex_lock/mutex_unlock */
-	phy_support_asym_pause(db->phydev); /* Enable support of asym pause */
-	dm9051_restart_phy(db);
-	phy_attached_info(db->phydev);
 }
 
 static void dm9051_stopcode_lock(struct board_info *db)
@@ -814,7 +795,12 @@ static int dm9051_open(struct net_device *ndev)
 	db->phydev->duplex = 0;
 
 	dm9051_phyup_lock(db);
-	dm9051_initcode_lock(ndev, db);
+	dm9051_initcode_lock(db);
+
+	/* phy mdiobus phy read/write is enclose with mutex_lock/mutex_unlock */
+	phy_support_sym_pause(db->phydev); /* Enable support of asym pause */
+	phy_start(db->phydev);
+
 	dm9051_imr_enable_lock_essential(db);
 	return 0;
 }
