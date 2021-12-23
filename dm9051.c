@@ -27,8 +27,7 @@
 #include "dm9051.h"
 
 /* spi low level code */
-static int
-dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, unsigned int len)
+static inline int dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, unsigned int len)
 {
 	struct device *dev = &db->spidev->dev;
 	int ret;
@@ -247,11 +246,13 @@ static void dm9051_restart_fifo_rst(struct board_info *db)
 
 	db->bc.DO_FIFO_RST_counter++;
 
-	if (db->fl.fc_rx)
+	if (db->eth_pause.rx_pause)
 		fcr |= FCR_BKPM | FCR_FLCE;
-	if (db->fl.fc_tx)
+	if (db->eth_pause.tx_pause)
 		fcr |= FCR_TXPEN;
 
+	//if (dm9051_ior(db, DM9051_FCR) != fcr) //temp 
+		printk("aet _restart_fifo_rst fcr %02x\n", fcr);
 	dm9051_iow(db, DM9051_FCR, fcr); /* init and/or save pause param FlowCtrl */
 	dm9051_iow(db, DM9051_PPCR, PPCR_PAUSE_COUNT); /* Pause Pkt Count */
 	dm9051_iow(db, DM9051_LMCR, db->lcr_all); /* LEDMode1 */
@@ -261,7 +262,7 @@ static void dm9051_restart_fifo_rst(struct board_info *db)
 static void dm9051_restart_phy(struct board_info *db)
 {
 	/* configure phy advertised pause support */
-	phy_set_asym_pause(db->phydev, db->fl.fc_rx, db->fl.fc_tx);
+	phy_set_asym_pause(db->phydev, db->eth_pause.rx_pause ? true : false, db->eth_pause.tx_pause ? true : false);
 	phy_start(db->phydev);
 }
 
@@ -269,30 +270,32 @@ static void dm9051_handle_link_change(struct net_device *ndev)
 {
 	struct board_info *db = to_dm9051_board(ndev);
 	u8 fcr = 0;
-	int lcladv, ret;
+	int lcl_adv, rmt_adv;
 
 	phy_print_status(ndev->phydev);
 
 	/* only write pause settings to mac. since mac and phy are integrated
 	 * together, such as link state, speed and duplex are sync already
 	 */
+	if (ndev->phydev->link) { // && (db->eth_pause.autoneg == AUTONEG_ENABLE)
+		lcl_adv = linkmode_adv_to_mii_adv_t(db->phydev->advertising);
+		rmt_adv = linkmode_adv_to_mii_adv_t(db->phydev->lp_advertising);
+		printk("link change lcladv & remoteadv, %04x & %04x, from phydev\n", lcl_adv, rmt_adv); //. 
 
-	mutex_lock(&db->addr_lock);
-	ret = dm9051_phy_read(db, MII_ADVERTISE, &lcladv);
-	mutex_unlock(&db->addr_lock);
-	if (ret)
-		return;
+		if (lcl_adv & rmt_adv & ADVERTISE_PAUSE_CAP) {
+			db->eth_pause.rx_pause = true;
+			db->eth_pause.tx_pause = true;
+			fcr = FCR_FLOW_ENABLE;
+		}
 
-	if (lcladv & db->phydev->pause & ADVERTISE_PAUSE_CAP) {
-		db->fl.fc_rx = true;
-		db->fl.fc_tx = true;
-		fcr = FCR_FLOW_ENABLE;
+		mutex_lock(&db->addr_lock);
+		if (dm9051_ior(db, DM9051_FCR) != fcr) { //temp 
+			printk("aet _handle_link_change fcr %02x\n", fcr);
+			dm9051_iow(db, DM9051_FCR, fcr); /* link change, if autoneg, used advertis FlowCtrl */
+		}
+		printk("link change fcr %02x\n", fcr); //temp 
+		mutex_unlock(&db->addr_lock);
 	}
-
-	mutex_lock(&db->addr_lock);
-	if (dm9051_ior(db, DM9051_FCR) != fcr)
-		dm9051_iow(db, DM9051_FCR, fcr); /* save pause param FlowCtrl */
-	mutex_unlock(&db->addr_lock);
 }
 
 static int dm9051_phy_connect(struct board_info *db)
@@ -434,9 +437,7 @@ static void dm9051_get_pauseparam(struct net_device *ndev,
 {
 	struct board_info *db = to_dm9051_board(ndev);
 
-	pause->rx_pause = db->fl.fc_rx;
-	pause->tx_pause = db->fl.fc_tx;
-	pause->autoneg = db->fl.aneg;
+	*pause = db->eth_pause;
 }
 
 static int dm9051_set_pauseparam(struct net_device *ndev,
@@ -445,9 +446,7 @@ static int dm9051_set_pauseparam(struct net_device *ndev,
 	struct board_info *db = to_dm9051_board(ndev);
 	u8 fcr = 0;
 
-	db->fl.fc_rx = pause->rx_pause;
-	db->fl.fc_tx = pause->tx_pause;
-	db->fl.aneg = pause->autoneg;
+	db->eth_pause = *pause;
 
 	if (pause->autoneg)
 		db->phydev->autoneg = AUTONEG_ENABLE;
@@ -461,6 +460,8 @@ static int dm9051_set_pauseparam(struct net_device *ndev,
 		if (pause->tx_pause)
 			fcr |= FCR_TXPEN;
 	}
+	if (dm9051_ior(db, DM9051_FCR) != fcr) //temp 
+		printk("aet pause param fcr %02x\n", fcr);
 	if (dm9051_ior(db, DM9051_FCR) != fcr)
 		dm9051_iow(db, DM9051_FCR, fcr); /* set pause param FlowCtrl */
 	mutex_unlock(&db->addr_lock);
@@ -715,26 +716,51 @@ static void dm9051_control_init(struct board_info *db)
 	INIT_DELAYED_WORK(&db->tx_work, int_tx_delay);
 }
 
+static inline void dm9051_phyup_lock(struct board_info *db)
+{
+	int val, ret;
+	mutex_lock(&db->addr_lock);
+
+	ret = dm9051_phy_read(db, MII_BMCR, &val);
+
+	/* BMCR Power-up PHY */
+	dev_info(&db->spidev->dev, "_mdio_write %d %04x(BMCR phyup)\n", MII_BMCR, val & ~0x0800);
+	ret = dm9051_phy_write(db, MII_BMCR, val & ~0x0800); /* BMCR Power-up PHY */
+
+	dm9051_iow(db, DM9051_GPR, 0x01); /* GPR Power-down PHY */
+	dev_info(&db->spidev->dev, "*_dm9051_iow %02x %02x(GPR phydown)\n", DM9051_GPR, 0x01);
+
+	dm9051_iow(db, DM9051_GPR, 0); /* GPR Power-up PHY */
+	dev_info(&db->spidev->dev, "*_dm9051_iow %02x %02x(GPR phyup)\n", DM9051_GPR, 0);
+	dev_info(&db->spidev->dev, "[dm9051_iow/add delay..] %02x %02x\n", DM9051_GPR, 0);
+	mdelay(1); /* need for activate phyxcer */
+
+	mutex_unlock(&db->addr_lock);
+}
+
+static inline void dm9051_phydown_lock(struct board_info *db)
+{
+	int val, ret;
+	mutex_lock(&db->addr_lock);
+
+#if 0
+#else
+	/* In phy power down, (can be either BMCR phy down or GPR phy down!!) */
+	ret = dm9051_phy_read(db, MII_BMCR, &val);
+	if (val & 0x0800) {
+		dev_info(&db->spidev->dev, "*NOT _dm9051_iow 0x%02x 0x%02x (keep as BMCR phy down)\n", DM9051_GPR, 0x01);
+	} else {
+		dev_info(&db->spidev->dev, "*DO _dm9051_iow 0x%02x 0x%02x (power-down phy)\n", DM9051_GPR, 0x01);
+		dm9051_iow(db, DM9051_GPR, 0x01); /* Power-Down PHY */
+	}
+#endif
+
+	mutex_unlock(&db->addr_lock);
+}
+
 static void dm9051_initcode_lock(struct net_device *dev, struct board_info *db)
 {
-	db->imr_all = IMR_PAR | IMR_PRM;
-	db->rcr_all = RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN;
-	db->lcr_all = LMCR_MODE1;
-
-	/* init pause param FlowCtrl */
-	db->fl.fc_rx = true;
-	db->fl.fc_tx = true;
-	db->fl.aneg = AUTONEG_ENABLE;
-
-	/* We may have start with auto negotiation */
-	db->phydev->autoneg = AUTONEG_ENABLE;
-	db->phydev->speed = 0;
-	db->phydev->duplex = 0;
-
 	mutex_lock(&db->addr_lock); /* Note: must */
-
-	dm9051_iow(db, DM9051_GPR, 0); /* REG_1F bit0 activate phyxcer */
-	mdelay(1); /* delay needs for activate phyxcer */
 
 	dm9051_reset(db);
 	dm9051_restart_fifo_rst(db);
@@ -751,7 +777,6 @@ static void dm9051_stopcode_lock(struct board_info *db)
 {
 	mutex_lock(&db->addr_lock);
 
-	dm9051_iow(db, DM9051_GPR, 0x01); /* Power-Down PHY */
 	dm9051_iow(db, DM9051_RCR, RCR_RX_DISABLE);	/* Disable RX */
 
 	mutex_unlock(&db->addr_lock);
@@ -774,6 +799,21 @@ static int dm9051_open(struct net_device *ndev)
 	if (ret < 0)
 		return ret;
 
+	db->imr_all = IMR_PAR | IMR_PRM;
+	db->rcr_all = RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN;
+	db->lcr_all = LMCR_MODE1;
+
+	/* init pause param FlowCtrl */
+	db->eth_pause.rx_pause = true;
+	db->eth_pause.tx_pause = true;
+	db->eth_pause.autoneg = AUTONEG_ENABLE;
+
+	/* We may have start with auto negotiation */
+	db->phydev->autoneg = AUTONEG_ENABLE;
+	db->phydev->speed = 0;
+	db->phydev->duplex = 0;
+
+	dm9051_phyup_lock(db);
 	dm9051_initcode_lock(ndev, db);
 	dm9051_imr_enable_lock_essential(db);
 	return 0;
@@ -791,6 +831,7 @@ static int dm9051_stop(struct net_device *ndev)
 	phy_stop(db->phydev);
 	dm9051_stopcode_release(db);
 	netif_stop_queue(ndev);
+	dm9051_phydown_lock(db);
 	dm9051_stopcode_lock(db);
 	return 0;
 }

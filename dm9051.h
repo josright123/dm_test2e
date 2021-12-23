@@ -154,12 +154,6 @@ struct rx_ctl_mach {
 	u16				DO_FIFO_RST_counter; /* The counter of 'fifo_reset' */
 };
 
-struct flow_ctl_tag {
-	bool				fc_rx;  /* flow control rx */
-	bool				fc_tx;  /* flow control tx */
-	bool				aneg;  /* flow control auto negotiation */
-};
-
 struct dm9051_rxhdr {
 	u8				rxpktready;
 	u8				rxstatus;
@@ -171,7 +165,7 @@ struct board_info {
 	struct spi_transfer		spi_xfer2[2] ____cacheline_aligned;
 	struct spi_message		spi_msg2 ____cacheline_aligned;
 	struct rx_ctl_mach		bc ____cacheline_aligned;
-	struct flow_ctl_tag		fl ____cacheline_aligned;
+	struct ethtool_pauseparam 	eth_pause ____cacheline_aligned;
 	struct dm9051_rxhdr		*prxhdr ____cacheline_aligned;
 	struct spi_device		*spidev;
 	struct net_device		*ndev;
