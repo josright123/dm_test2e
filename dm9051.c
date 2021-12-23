@@ -241,42 +241,16 @@ static void dm9051_reset(struct board_info *db)
 	mdelay(1);
 	dm9051_iow(db, DM9051_MBNDRY, MBNDRY_BYTE); /* MemBound */
 	mdelay(1);
-
-	// work around for if ever phy power down
-#if 0
-	if (1) {
-		//int ret = 
-		dm9051_phy_write(db, 0, 0x8000);
-	}
-#endif
 }
 
 static void dm9051_restart_fifo_rst(struct board_info *db)
 {
-	u8 fcr = 0;
-
 	db->bc.DO_FIFO_RST_counter++;
 
-	if (db->fl.fc_rx)
-		fcr |= FCR_BKPM | FCR_FLCE;
-	if (db->fl.fc_tx)
-		fcr |= FCR_TXPEN;
-
-//	printk("init fcr %02x\n", fcr);
-//.	dm9051_iow(db, DM9051_FCR, fcr); /* init and/or save pause param FlowCtrl */
 	dm9051_iow(db, DM9051_PPCR, PPCR_PAUSE_COUNT); /* Pause Pkt Count */
 	dm9051_iow(db, DM9051_LMCR, db->lcr_all); /* LEDMode1 */
 	dm9051_iow(db, DM9051_INTCR, INTCR_POL_LOW); /* INTCR */
 }
-
-#if 0
-static void dm9051_phy_restart(struct board_info *db)
-{
-	/* configure phy advertised pause support */
-	phy_set_asym_pause(db->phydev, db->fl.fc_rx, db->fl.fc_tx);
-	phy_start(db->phydev);
-}
-#endif
 
 static void dm9051_handle_link_change(struct net_device *ndev)
 {
@@ -290,17 +264,6 @@ static void dm9051_handle_link_change(struct net_device *ndev)
 	 * together, such as link state, speed and duplex are sync already
 	 */
 	if (ndev->phydev->link) {
-		//int ret;
-		//mutex_lock(&db->addr_lock);
-		//ret = dm9051_phy_read(db, MII_ADVERTISE, &lcl_adv);
-		//if (!ret)
-		//	ret = dm9051_phy_read(db, MII_LPA, &rmt_adv);
-		//mutex_unlock(&db->addr_lock);
-		//if (ret)
-		//	return;
-
-		//printk("link change lcladv & remoteadv, %04x & %04x\n", lcl_adv, rmt_adv);
-
 		lcl_adv = linkmode_adv_to_mii_adv_t(db->phydev->advertising);
 		rmt_adv = linkmode_adv_to_mii_adv_t(db->phydev->lp_advertising);
 		printk("link change lcladv & remoteadv, %04x & %04x, from phydev\n", lcl_adv, rmt_adv);
@@ -369,26 +332,6 @@ static void dm9051_init_mac_addr(struct net_device *ndev, struct board_info *db)
 
 	eth_hw_addr_random(ndev);
 	dev_dbg(&db->spidev->dev, "Use random MAC address\n");
-}
-
-/* set mac permanently
- */
-static void dm9051_write_mac_lock(struct board_info *db)
-{
-	struct net_device *ndev = db->ndev;
-	int i, oft;
-
-	netdev_dbg(ndev, "set_mac_address %pM\n", ndev->dev_addr);
-
-	/* write to net device and chip */
-	mutex_lock(&db->addr_lock);
-	for (i = 0, oft = DM9051_PAR; i < ETH_ALEN; i++, oft++)
-		dm9051_iow(db, oft, ndev->dev_addr[i]);
-	mutex_unlock(&db->addr_lock);
-
-	/* write to EEPROM */
-	for (i = 0; i < ETH_ALEN; i += 2)
-		dm9051_write_eeprom(db, i / 2, (u8 *)&ndev->dev_addr[i]);
 }
 
 /* ethtool-ops
@@ -531,16 +474,8 @@ static void dm9051_restart_code(struct board_info *db)
 	netdev_dbg(ndev, "dm9-pkt-Wrong, RxLen over-range (%x= %d > %x= %d)\n",
 		   rxlen, rxlen, DM9051_PKT_MAX, DM9051_PKT_MAX);
 
-//	mutex_unlock(&db->addr_lock); /* unlock, mdiobus phy read/write has mutex enclose */
-//	phy_stop(db->phydev);
-
-//	mutex_lock(&db->addr_lock); /* lock, mdiobus phy read/write has mutex enclose */
 	dm9051_reset(db);
 	dm9051_restart_fifo_rst(db);
-//	mutex_unlock(&db->addr_lock); /* unlock, mdiobus phy read/write has mutex enclose */
-
-//	dm9051_phy_restart(db);
-//	mutex_lock(&db->addr_lock); /* lock, mdiobus phy read/write has mutex enclose */
 
 	netdev_dbg(ndev, " RxLenErr&MacOvrSft_Er %d, RST_c %d\n",
 		   db->bc.large_err_counter + db->bc.mac_ovrsft_counter,
@@ -614,14 +549,6 @@ static int test_restart_add_larg_tst = 0;
 test_restart_add_larg_tst += scanrr;
 #if 0
 	if (test_restart > 250) {
-		//struct net_device *ndev = db->ndev;
-//		char *sbuff = (char *)db->prxhdr;
-//		int rxlen = le16_to_cpu(db->prxhdr->rxlen);
-
-//		netdev_info(ndev, "dm9-rxhdr, Large-eror (rxhdr %02x %02x %02x %02x)\n",
-//			   sbuff[0], sbuff[1], sbuff[2], sbuff[3]);
-//		netdev_info(ndev, "dm9-pkt-Wrong, RxLen over-range (%x= %d > %x= %d)\n",
-//			   rxlen, rxlen, DM9051_PKT_MAX, DM9051_PKT_MAX);
 
 	  test_restart = 0;
 
@@ -644,12 +571,7 @@ test_restart_add_larg_tst += scanrr;
 			dm9051_iow(db, DM9051_IMR, db->imr_all); /* rxp to 0xc00 */
 		}
 		if (1) { // to be if (1)
-
-			//.mutex_lock(&db->addr_lock);
-
 			dm9051_iow(db, DM9051_RCR, db->rcr_all); /* EnabRX all */
-
-			//.mutex_unlock(&db->addr_lock);
 		}
 
 //		printk("[Read FCR] 0x%02x\n", dm9051_ior(db, DM9051_FCR)); /* fcr */
@@ -727,27 +649,6 @@ static irqreturn_t dm9051_rx_threaded_irq(int irq, void *pw)
 	mutex_unlock(&db->spi_lock); /* mutex essential */
 
 	return IRQ_HANDLED;
-}
-
-/* end with enable the interrupt mask
- */
-static int dm9051_opencode_receiving(struct net_device *ndev, struct board_info *db)
-{
-	int ret;
-	struct spi_device *spi = db->spidev;
-
-	ndev->irq = spi->irq; /* by dts */
-	ret = request_threaded_irq(spi->irq, NULL, dm9051_rx_threaded_irq,
-				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-				   ndev->name, db);
-
-	if (ret < 0) {
-		netdev_err(ndev, "failed to get irq\n");
-		return ret;
-	}
-
-	netdev_dbg(ndev, "[dm9051_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, ndev->irq);
-	return 0;
 }
 
 static void int_tx_delay(struct work_struct *w)
@@ -869,29 +770,15 @@ static void dm9051_stopcode_lock(struct board_info *db)
 	mutex_unlock(&db->addr_lock);
 }
 
-	#define DM_DM_CONF_DTS_COMPATIBLE_USAGE		"davicom,dm9051"
-	u32 dm_dts_spi_max_frequency(void) {
-		u32 max_spi_speed;
-		struct device_node *nc;
-		int rc;
-		if ((nc = of_find_compatible_node(NULL, NULL, DM_DM_CONF_DTS_COMPATIBLE_USAGE))) {
-			rc = of_property_read_u32(nc, "spi-max-frequency", &max_spi_speed); // read to DTS, read-spi_max_speed
-			if (!rc)
-				return max_spi_speed;
-			return 0;
-		}
-		return 0;
-	}
-	#define dm_msg_open(ndev) dm_msg_open_receiving_dev_debug_dts_int(ndev)
-	static void dm_msg_open_receiving_dev_debug_dts_int(struct net_device *ndev) {
-		struct board_info *db = netdev_priv(ndev);
-		struct device *dev = &db->spidev->dev;
-		u32 speed; /* Read DTS here! */
-		if ((speed = dm_dts_spi_max_frequency()))
-			dev_info(dev, "dm9 open, spi clock: %d !\n", speed); //INT,50000000(db->Drv_Version_speed)
-		else
-			dev_info(dev, "*dm9 open WARN, No DTS compatible node or DTS has no spi-max-frequency\n");
-	}
+#if 0
+static void dm9051_phy_restart(struct board_info *db)
+{
+	/* configure phy advertised pause support */
+	phy_set_asym_pause(db->phydev, db->fl.fc_rx, db->fl.fc_tx);
+	phy_start(db->phydev);
+}
+#endif
+
 /* Open network device
  * Called when the network device is marked active, such as a user executing
  * 'ifconfig up' on the device
@@ -902,15 +789,11 @@ static int dm9051_open(struct net_device *ndev)
 	struct spi_device *spi = db->spidev;
 	int ret;
 
-dm_msg_open(ndev);
 	skb_queue_head_init(&db->txq);
 	netif_start_queue(ndev);
 	netif_wake_queue(ndev);
 
-	//.ret = dm9051_opencode_receiving(ndev, db);
-	//.if (ret < 0)
-	//.	return ret;
-	//=
+	netdev_dbg(ndev, "[dm9051_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, spi->irq);
 	ndev->irq = spi->irq; /* by dts */
 	ret = request_threaded_irq(spi->irq, NULL, dm9051_rx_threaded_irq,
 				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
@@ -919,7 +802,6 @@ dm_msg_open(ndev);
 		netdev_err(ndev, "failed to get irq\n");
 		return ret;
 	}
-	netdev_dbg(ndev, "[dm9051_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, ndev->irq);
 
 	db->imr_all = IMR_PAR | IMR_PRM;
 	db->rcr_all = RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN;
@@ -935,25 +817,17 @@ dm_msg_open(ndev);
 	db->phydev->speed = 0;
 	db->phydev->duplex = 0;
 
-	dm9051_phyup_lock(db); //dm9051_iow(db, DM9051_GPR, 0); /* REG_1F bit0 activate phyxcer */
+	dm9051_phyup_lock(db);
 	dm9051_initcode_lock(db);
 
 	/* phy mdiobus phy read/write is enclose with mutex_lock/mutex_unlock */
 	//..phy_support_asym_pause(db->phydev); /* Enable support of asym pause */
+
 	//dm9051_phy_restart(db);
 	//=
 	/* configure phy advertised pause support */
 	//..phy_set_asym_pause(db->phydev, db->fl.fc_rx, db->fl.fc_tx);
 	phy_start(db->phydev);
-	
-	//phy_attached_info(db->phydev);
-	//=
-	if (1) {
-		char *irq_str = phy_attached_info_irq(db->phydev);
-		#define PHY_FMT	"attached PHY driver (irq=%s)"
-		dev_info(&db->spidev->dev, PHY_FMT "\n", irq_str);
-		kfree(irq_str);
-	}
 	
 	dm9051_imr_enable_lock_essential(db);
 	return 0;
@@ -1028,30 +902,20 @@ static void dm9051_set_multicast_list_schedule(struct net_device *ndev)
  */
 static int dm9051_set_mac_address(struct net_device *ndev, void *p)
 {
-	netdev_info(ndev, "START set_mac_address %pM\n", ndev->dev_addr);
-	if (1) {
 	struct board_info *db = to_dm9051_board(ndev);
 	int i, oft;
 
 	int ret = eth_mac_addr(ndev, p);
-
 	if (ret < 0) {
-	  netdev_info(ndev, "*NOT set_mac_address %pM\n", ndev->dev_addr);
 		return ret;
 	}
-
-	netdev_info(ndev, "set_mac_address %pM\n", ndev->dev_addr);
-
-	netdev_dbg(ndev, "set_mac_address %pM\n", ndev->dev_addr);
 
 	/* write to chip */
 	mutex_lock(&db->addr_lock);
 	for (i = 0, oft = DM9051_PAR; i < ETH_ALEN; i++, oft++)
 		dm9051_iow(db, oft, ndev->dev_addr[i]);
 	mutex_unlock(&db->addr_lock);
-//.	struct board_info *db = to_dm9051_board(ndev);
-//.	dm9051_write_mac_lock(db);
-	}
+
 	return 0;
 }
 
