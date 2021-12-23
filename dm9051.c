@@ -237,7 +237,7 @@ static void dm9051_reset(struct board_info *db)
 	mdelay(1);
 }
 
-static void dm9051_restart_fifo_rst(struct board_info *db)
+static void dm9051_reset_control(struct board_info *db)
 {
 	db->bc.DO_FIFO_RST_counter++;
 
@@ -257,7 +257,7 @@ static void dm9051_handle_link_change(struct net_device *ndev)
 	/* only write pause settings to mac. since mac and phy are integrated
 	 * together, such as link state, speed and duplex are sync already
 	 */
-	if (ndev->phydev->link) { // && (db->eth_pause.autoneg == AUTONEG_ENABLE)
+	if (ndev->phydev->link) { // && (db->eth_pause.autoneg == AUTONEG_ENABLE) //(add)
 		lcl_adv = linkmode_adv_to_mii_adv_t(db->phydev->advertising);
 		rmt_adv = linkmode_adv_to_mii_adv_t(db->phydev->lp_advertising);
 		netdev_info(ndev, "localadv %04x & remoteadv %04x\n", lcl_adv, rmt_adv);
@@ -290,7 +290,7 @@ static int dm9051_phy_connect(struct board_info *db)
 	return 0;
 }
 
-/* ESSENTIAL, ensure rxFifoPoint control, disable/enable the interrupt mask
+/* essential, ensure rxFifoPoint control, disable/enable the interrupt mask
  */
 static void dm9051_imr_disable_lock_essential(struct board_info *db)
 {
@@ -448,11 +448,12 @@ static void dm9051_operation_clear(struct board_info *db)
 
 /* reset while rx error found
  */
-static void dm9051_restart_code(struct board_info *db)
+static void dm9051_fifo_reset(struct board_info *db)
 {
 	struct net_device *ndev = db->ndev;
 	char *sbuff = (char *)db->prxhdr;
 	int rxlen = le16_to_cpu(db->prxhdr->rxlen);
+	u8 fcr = 0;
 
 	netdev_dbg(ndev, "dm9-rxhdr, Large-eror (rxhdr %02x %02x %02x %02x)\n",
 		   sbuff[0], sbuff[1], sbuff[2], sbuff[3]);
@@ -460,7 +461,17 @@ static void dm9051_restart_code(struct board_info *db)
 		   rxlen, rxlen, DM9051_PKT_MAX, DM9051_PKT_MAX);
 
 	dm9051_reset(db);
-	dm9051_restart_fifo_rst(db);
+	dm9051_reset_control(db);
+
+	if (db->eth_pause.rx_pause || db->eth_pause.tx_pause) {
+		if (db->eth_pause.rx_pause)
+			fcr |= FCR_BKPM | FCR_FLCE;
+		if (db->eth_pause.tx_pause)
+			fcr |= FCR_TXPEN;
+	}
+	dm9051_iow(db, DM9051_FCR, fcr); /* init and/or save pause param FlowCtrl */
+	dm9051_iow(db, DM9051_IMR, db->imr_all); /* rxp to 0xc00 */
+	dm9051_iow(db, DM9051_RCR, db->rcr_all); /* EnabRX all */
 
 	netdev_dbg(ndev, " RxLenErr&MacOvrSft_Er %d, RST_c %d\n",
 		   db->bc.large_err_counter + db->bc.mac_ovrsft_counter,
@@ -482,8 +493,7 @@ static int dm9051_loop_rx(struct board_info *db)
 	struct sk_buff *skb;
 	u8 *rdptr;
 	int scanrr = 0;
-static int test_restart_add_larg_tst = 0;
-//static int pass_count_for_disp = 0;
+
 	while (1) {
 		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
 		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
@@ -505,9 +515,10 @@ static int test_restart_add_larg_tst = 0;
 			netdev_dbg(ndev, "warn : rxhdr.status 0x%02x\n",
 				   db->prxhdr->rxstatus);
 		}
+
 		if (rxlen > DM9051_PKT_MAX) {
 			db->bc.large_err_counter++;
-			dm9051_restart_code(db);
+			dm9051_fifo_reset(db);
 			return 0;
 		}
 
@@ -538,41 +549,6 @@ static int test_restart_add_larg_tst = 0;
 		db->ndev->stats.rx_packets++;
 		scanrr++;
 	}
-
-test_restart_add_larg_tst += scanrr;
-#if 0
-	if (test_restart > 250) {
-
-	  test_restart = 0;
-
-		db->bc.large_err_counter++;
-		dm9051_restart_code(db);
-
-//		printk("pre-[Read FCR] 0x%02x\n", dm9051_ior(db, DM9051_FCR)); /* fcr */
-//		printk("pre-[Read IMR] 0x%02x\n", dm9051_ior(db, DM9051_IMR)); /* rxp to 0xc00 */
-//		printk("pre-[Read RCR] 0x%02x\n", dm9051_ior(db, DM9051_RCR)); /* rcr */
-
-		if (1) {
-			u8 fcr = 0;
-			if (db->fl.fc_rx)
-				fcr |= FCR_BKPM | FCR_FLCE;
-			if (db->fl.fc_tx)
-				fcr |= FCR_TXPEN;
-			dm9051_iow(db, DM9051_FCR, fcr); /* init and/or save pause param FlowCtrl */
-		}
-		if (1) {
-			dm9051_iow(db, DM9051_IMR, db->imr_all); /* rxp to 0xc00 */
-		}
-		if (1) { // to be if (1)
-			dm9051_iow(db, DM9051_RCR, db->rcr_all); /* EnabRX all */
-		}
-
-//		printk("[Read FCR] 0x%02x\n", dm9051_ior(db, DM9051_FCR)); /* fcr */
-//		printk("[Read IMR] 0x%02x\n", dm9051_ior(db, DM9051_IMR)); /* rxp to 0xc00 */
-		printk("[Read RCR] 0x%02x, pass-count %d\n", dm9051_ior(db, DM9051_RCR), ++pass_count_for_disp); /* rcr */
-		return 0;
-	}
-#endif
 	return scanrr;
 }
 
@@ -720,9 +696,6 @@ static inline void dm9051_phyup_lock(struct board_info *db)
 	mdelay(1); /* need for activate phyxcer */
 
 	mutex_unlock(&db->addr_lock);
-
-	//dev_info(&db->spidev->dev, "_mdio_write %d %04x(BMCR phyup)\n", MII_BMCR, val & ~0x0800); //temp 
-	//dev_info(&db->spidev->dev, "_dm9051_iow %02x %02x(GPR phyup)\n", DM9051_GPR, 0); //temp 
 }
 
 static inline void dm9051_phydown_lock(struct board_info *db)
@@ -736,7 +709,7 @@ static void dm9051_initcode_lock(struct board_info *db)
 {
 	mutex_lock(&db->addr_lock); /* Note: must */
 	dm9051_reset(db);
-	dm9051_restart_fifo_rst(db);
+	dm9051_reset_control(db);
 	mutex_unlock(&db->addr_lock);
 }
 
