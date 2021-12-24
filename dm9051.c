@@ -516,7 +516,7 @@ static int dm9051_loop_rx(struct board_info *db)
 		if (db->eth_rxhdr.rxstatus & 0xbf || rxlen > DM9051_PKT_MAX) {
 			if (db->eth_rxhdr.rxstatus & 0xbf)
 				db->bc.status_err_counter++;
-			else 
+			else
 				db->bc.large_err_counter++;
 			dm9051_fifo_reset(db);
 			return 0;
