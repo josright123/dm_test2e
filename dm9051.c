@@ -26,6 +26,16 @@
 
 #include "dm9051.h"
 
+static int msg_enable = NETIF_MSG_PROBE |
+			NETIF_MSG_LINK |
+			NETIF_MSG_IFDOWN |
+			NETIF_MSG_IFUP |
+			NETIF_MSG_RX_ERR |
+			NETIF_MSG_TX_ERR;
+
+module_param(msg_enable, int, 0);
+MODULE_PARM_DESC(msg_enable, "Message mask bitmapped");
+
 /* spi low level code */
 static inline int dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, unsigned int len)
 {
@@ -45,7 +55,7 @@ static inline int dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, u
 		db->spi_xfer2[1].rx_buf = rxb;
 		db->spi_xfer2[1].len = len;
 	}
-	ret = spi_sync(db->spidev, &db->spi_msg2);
+	ret = spi_sync(db->spidev, &db->spi_msg);
 	if (ret < 0)
 		dev_err(dev, "spi burst cmd 0x%02x, ret=%d\n", cmd, ret);
 	return ret;
@@ -888,9 +898,9 @@ static void dm9051_netdev(struct net_device *ndev)
 static void dm9051_spimsg_addtail(struct board_info *db)
 {
 	memset(&db->spi_xfer2, 0, sizeof(struct spi_transfer) * 2);
-	spi_message_init(&db->spi_msg2);
-	spi_message_add_tail(&db->spi_xfer2[0], &db->spi_msg2);
-	spi_message_add_tail(&db->spi_xfer2[1], &db->spi_msg2);
+	spi_message_init(&db->spi_msg);
+	spi_message_add_tail(&db->spi_xfer2[0], &db->spi_msg);
+	spi_message_add_tail(&db->spi_xfer2[1], &db->spi_msg);
 }
 
 static int dm9051_register_mdiobus(struct board_info *db)
@@ -934,7 +944,7 @@ static int dm9051_probe(struct spi_device *spi)
 	SET_NETDEV_DEV(ndev, dev);
 	dev_set_drvdata(dev, ndev);
 	db = netdev_priv(ndev);
-	db->msg_enable = 0;
+	db->msg_enable = msg_enable;
 	db->spidev = spi;
 	db->ndev = ndev;
 	dm9051_netdev(ndev);

@@ -163,12 +163,9 @@ struct dm9051_rxhdr {
 };
 
 struct board_info {
-	u8				cmd[2] ____cacheline_aligned;
-	struct spi_transfer		spi_xfer2[2] ____cacheline_aligned;
-	struct spi_message		spi_msg2 ____cacheline_aligned;
-	struct rx_ctl_mach		bc ____cacheline_aligned;
-	struct ethtool_pauseparam 	eth_pause ____cacheline_aligned;
-	struct dm9051_rxhdr		eth_rxhdr ____cacheline_aligned;
+	struct spi_message		spi_msg;
+	struct spi_transfer		spi_xfer2[2];
+	u8				cmd[2];
 	struct spi_device		*spidev;
 	struct net_device		*ndev;
 	struct mii_bus			*mdiobus;
@@ -178,8 +175,11 @@ struct board_info {
 	struct mutex			addr_lock;	/* dm9051's REG lock */
 	struct delayed_work		rxctrl_work;
 	struct delayed_work		tx_work;
+	struct rx_ctl_mach		bc;
+	struct dm9051_rxhdr		eth_rxhdr;
+	struct ethtool_pauseparam 	eth_pause;
+	u32				msg_enable;
 	u16				hash_table[4];
-	u32				msg_enable ____cacheline_aligned;
 	u8				imr_all;
 	u8				rcr_all;
 	u8				lcr_all;
