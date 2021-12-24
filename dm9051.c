@@ -522,12 +522,11 @@ static int dm9051_loop_rx(struct board_info *db)
 			return 0;
 		}
 
-		skb = dev_alloc_skb(rxlen + 4);
+		skb = dev_alloc_skb(rxlen);
 		if (!skb) {
 			dm9051_dumpblk(db, rxlen);
 			return scanrr;
 		}
-		skb_reserve(skb, 2);
 		rdptr = (u8 *)skb_put(skb, rxlen - 4);
 
 		ret = dm9051_inblk(db, rdptr, rxlen);
@@ -541,10 +540,7 @@ static int dm9051_loop_rx(struct board_info *db)
 		skb->protocol = eth_type_trans(skb, db->ndev);
 		if (db->ndev->features & NETIF_F_RXCSUM)
 			skb_checksum_none_assert(skb);
-		if (in_interrupt())
-			netif_rx(skb);
-		else
-			netif_rx_ni(skb);
+		netif_rx_ni(skb);
 		db->ndev->stats.rx_bytes += rxlen;
 		db->ndev->stats.rx_packets++;
 		scanrr++;
@@ -596,6 +592,10 @@ static int dm9051_loop_tx(struct board_info *db)
 			ndev->stats.tx_bytes += skb->len;
 			ndev->stats.tx_packets++;
 		}
+
+		if (netif_queue_stopped(ndev) &&
+		    (skb_queue_len(&db->txq) < DM9051_TX_QUE_LO_WATER))
+			netif_wake_queue(ndev);
 	}
 	return ntx;
 }
@@ -730,8 +730,6 @@ static int dm9051_open(struct net_device *ndev)
 	struct spi_device *spi = db->spidev;
 	int ret;
 
-	skb_queue_head_init(&db->txq);
-	netif_start_queue(ndev);
 	netif_wake_queue(ndev);
 
 	netdev_dbg(ndev, "[dm9051_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, spi->irq);
@@ -792,7 +790,9 @@ static netdev_tx_t dm9051_start_xmit(struct sk_buff *skb, struct net_device *nde
 	struct board_info *db = to_dm9051_board(ndev);
 
 	skb_queue_tail(&db->txq, skb); /* add to skb */
-	schedule_delayed_work(&db->tx_work, 0);
+	if (skb_queue_len(&db->txq) > DM9051_TX_QUE_HI_WATER) /* enforce limit queue size */
+		netif_stop_queue(ndev);
+	schedule_delayed_work(&db->tx_work, 0); /* spi operation must in delayed work */
 	return NETDEV_TX_OK;
 }
 
@@ -830,7 +830,7 @@ static void dm9051_set_multicast_list_schedule(struct net_device *ndev)
 		db->hash_table[hash_val / 16] |= (u16)1 << (hash_val % 16);
 	}
 
-	schedule_delayed_work(&db->rxctrl_work, 0);
+	schedule_delayed_work(&db->rxctrl_work, 0); /* spi operation must in delayed work */
 }
 
 /* event: write into the mac registers and eeprom directly
@@ -967,6 +967,9 @@ static int dm9051_probe(struct spi_device *spi)
 		dev_err(dev, "failed to register network device\n");
 		goto err_netdev;
 	}
+
+	skb_queue_head_init(&db->txq);
+
 	return 0;
 
 err_netdev:

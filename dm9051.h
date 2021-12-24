@@ -134,12 +134,14 @@
 
 /* Const
  */
-#define DM9051_PHY_ID		1	/* PHY id */
-#define DM9051_PHY		0x40	/* PHY address 0x01 */
-#define DM9051_PKT_RDY		0x01	/* Packet ready to receive */
-#define DM9051_PKT_MAX		1536	/* Received packet max size */
-#define DM_EEPROM_MAGIC		(0x9051)
-#define DM9051_EEPROM_NULLVALUE	0xffff	/* EEPROM null value for read error */
+#define DM9051_PHY_ID			1	/* PHY id */
+#define DM9051_PHY			0x40	/* PHY address 0x01 */
+#define DM9051_PKT_RDY			0x01	/* Packet ready to receive */
+#define DM9051_PKT_MAX			1536	/* Received packet max size */
+#define DM9051_TX_QUE_HI_WATER		50
+#define DM9051_TX_QUE_LO_WATER		25
+#define DM_EEPROM_MAGIC			(0x9051)
+#define DM9051_EEPROM_NULLVALUE		0xffff	/* EEPROM null value for read error */
 
 static inline struct board_info *to_dm9051_board(struct net_device *ndev)
 {
