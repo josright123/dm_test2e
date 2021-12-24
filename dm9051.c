@@ -257,20 +257,28 @@ static void dm9051_handle_link_change(struct net_device *ndev)
 	/* only write pause settings to mac. since mac and phy are integrated
 	 * together, such as link state, speed and duplex are sync already
 	 */
-	if (ndev->phydev->link) { // && (db->eth_pause.autoneg == AUTONEG_ENABLE) //(add)
-		lcl_adv = linkmode_adv_to_mii_adv_t(db->phydev->advertising);
-		rmt_adv = linkmode_adv_to_mii_adv_t(db->phydev->lp_advertising);
-		netdev_info(ndev, "localadv %04x & remoteadv %04x\n", lcl_adv, rmt_adv);
+	if (ndev->phydev->link) {
+		if (db->eth_pause.autoneg == AUTONEG_ENABLE) {
+			lcl_adv = linkmode_adv_to_mii_adv_t(db->phydev->advertising);
+			rmt_adv = linkmode_adv_to_mii_adv_t(db->phydev->lp_advertising);
 
-		if (lcl_adv & rmt_adv & ADVERTISE_PAUSE_CAP) {
-			db->eth_pause.rx_pause = true;
-			db->eth_pause.tx_pause = true;
-			fcr = FCR_FLOW_ENABLE;
+			netdev_info(ndev, "%04x/%04x(rmt)\n", lcl_adv, rmt_adv); //netdev_dbg(ndev, "localadv %04x & remoteadv %04x\n", lcl_adv, rmt_adv);
+			if (lcl_adv & rmt_adv & ADVERTISE_PAUSE_CAP) {
+				db->eth_pause.rx_pause = true;
+				db->eth_pause.tx_pause = true;
+			}
 		}
 
+		/* while both rx_pause & tx_pause, fcr will result as FCR_RXTX_ENABLE; */
+		if (db->eth_pause.rx_pause)
+			fcr |= FCR_BKPM | FCR_FLCE;
+		if (db->eth_pause.tx_pause)
+			fcr |= FCR_TXPEN;
+
+		/* to change if get new fcr */
 		mutex_lock(&db->addr_lock);
 		if (dm9051_ior(db, DM9051_FCR) != fcr)
-			dm9051_iow(db, DM9051_FCR, fcr); /* link change, if autoneg, used advertis FlowCtrl */
+			dm9051_iow(db, DM9051_FCR, fcr); /* on link change */
 		mutex_unlock(&db->addr_lock);
 	}
 }
@@ -410,15 +418,14 @@ static int dm9051_set_pauseparam(struct net_device *ndev,
 	else
 		db->phydev->autoneg = AUTONEG_DISABLE;
 
+	if (pause->rx_pause)
+		fcr |= FCR_BKPM | FCR_FLCE;
+	if (pause->tx_pause)
+		fcr |= FCR_TXPEN;
+
 	mutex_lock(&db->addr_lock);
-	if (pause->rx_pause || pause->tx_pause) {
-		if (pause->rx_pause)
-			fcr |= FCR_BKPM | FCR_FLCE;
-		if (pause->tx_pause)
-			fcr |= FCR_TXPEN;
-	}
 	if (dm9051_ior(db, DM9051_FCR) != fcr)
-		dm9051_iow(db, DM9051_FCR, fcr); /* set pause param FlowCtrl */
+		dm9051_iow(db, DM9051_FCR, fcr); /* on set pause param */
 	mutex_unlock(&db->addr_lock);
 
 	return 0;
@@ -441,7 +448,7 @@ static const struct ethtool_ops dm9051_ethtool_ops = {
 
 static void dm9051_operation_clear(struct board_info *db)
 {
-	db->bc.mac_ovrsft_counter = 0;
+	db->bc.status_err_counter = 0;
 	db->bc.large_err_counter = 0;
 	db->bc.DO_FIFO_RST_counter = 0;
 }
@@ -451,30 +458,31 @@ static void dm9051_operation_clear(struct board_info *db)
 static void dm9051_fifo_reset(struct board_info *db)
 {
 	struct net_device *ndev = db->ndev;
-	char *sbuff = (char *)db->prxhdr;
-	int rxlen = le16_to_cpu(db->prxhdr->rxlen);
+	char *sbuff = (char *)&db->eth_rxhdr;
+	int rxlen = le16_to_cpu(db->eth_rxhdr.rxlen);
 	u8 fcr = 0;
 
-	netdev_dbg(ndev, "dm9-rxhdr, Large-eror (rxhdr %02x %02x %02x %02x)\n",
+	netdev_dbg(ndev, "dm9-rxhdr (rxhdr %02x %02x %02x %02x)\n",
 		   sbuff[0], sbuff[1], sbuff[2], sbuff[3]);
-	netdev_dbg(ndev, "dm9-pkt-Wrong, RxLen over-range (%x= %d > %x= %d)\n",
-		   rxlen, rxlen, DM9051_PKT_MAX, DM9051_PKT_MAX);
+	netdev_dbg(ndev, "check rxstatus-eror (%02x)\n",
+		   db->eth_rxhdr.rxstatus);
+	netdev_dbg(ndev, "check rxlen large-eror (%d > %d)\n",
+		   rxlen, DM9051_PKT_MAX);
 
 	dm9051_reset(db);
 	dm9051_reset_control(db);
 
-	if (db->eth_pause.rx_pause || db->eth_pause.tx_pause) {
-		if (db->eth_pause.rx_pause)
-			fcr |= FCR_BKPM | FCR_FLCE;
-		if (db->eth_pause.tx_pause)
-			fcr |= FCR_TXPEN;
-	}
-	dm9051_iow(db, DM9051_FCR, fcr); /* init and/or save pause param FlowCtrl */
+	if (db->eth_pause.rx_pause)
+		fcr |= FCR_BKPM | FCR_FLCE;
+	if (db->eth_pause.tx_pause)
+		fcr |= FCR_TXPEN;
+
+	dm9051_iow(db, DM9051_FCR, fcr); /* om init or saved pause param */
 	dm9051_iow(db, DM9051_IMR, db->imr_all); /* rxp to 0xc00 */
 	dm9051_iow(db, DM9051_RCR, db->rcr_all); /* EnabRX all */
 
-	netdev_dbg(ndev, " RxLenErr&MacOvrSft_Er %d, RST_c %d\n",
-		   db->bc.large_err_counter + db->bc.mac_ovrsft_counter,
+	netdev_dbg(ndev, " rxstatus_Er & rxlen_Er %d, RST_c %d\n",
+		   db->bc.status_err_counter + db->bc.large_err_counter,
 		   db->bc.DO_FIFO_RST_counter);
 }
 
@@ -486,10 +494,8 @@ static void dm9051_fifo_reset(struct board_info *db)
  */
 static int dm9051_loop_rx(struct board_info *db)
 {
-	struct net_device *ndev = db->ndev;
 	u8 rxbyte;
 	int ret, rxlen;
-	char sbuff[DM_RXHDR_SIZE];
 	struct sk_buff *skb;
 	u8 *rdptr;
 	int scanrr = 0;
@@ -497,27 +503,21 @@ static int dm9051_loop_rx(struct board_info *db)
 	while (1) {
 		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
 		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
-		if (rxbyte != DM9051_PKT_RDY) {
-			dm9051_iow(db, DM9051_ISR, 0xff); /* Clear ISR, clear to stop mrcmd */
+		if (rxbyte != DM9051_PKT_RDY)
 			break; /* exhaust-empty */
-		}
 
-		ret = dm9051_inblk(db, sbuff, DM_RXHDR_SIZE);
+		ret = dm9051_inblk(db, (u8 *)&db->eth_rxhdr, DM_RXHDR_SIZE);
 		if (ret < 0)
 			return -EBUSY;
 
-		dm9051_iow(db, DM9051_ISR, 0xff); /* Clear ISR, clear to stop mrcmd */
+		dm9051_iow(db, DM9051_ISR, 0xff); /* ISR clear and to stop mrcmd */
 
-		db->prxhdr = (struct dm9051_rxhdr *)sbuff;
-		rxlen = le16_to_cpu(db->prxhdr->rxlen);
-
-		if (db->prxhdr->rxstatus & 0xbf) {
-			netdev_dbg(ndev, "warn : rxhdr.status 0x%02x\n",
-				   db->prxhdr->rxstatus);
-		}
-
-		if (rxlen > DM9051_PKT_MAX) {
-			db->bc.large_err_counter++;
+		rxlen = le16_to_cpu(db->eth_rxhdr.rxlen);
+		if (db->eth_rxhdr.rxstatus & 0xbf || rxlen > DM9051_PKT_MAX) {
+			if (db->eth_rxhdr.rxstatus & 0xbf)
+				db->bc.status_err_counter++;
+			else 
+				db->bc.large_err_counter++;
 			dm9051_fifo_reset(db);
 			return 0;
 		}
@@ -536,7 +536,7 @@ static int dm9051_loop_rx(struct board_info *db)
 			return -EBUSY;
 		}
 
-		dm9051_iow(db, DM9051_ISR, 0xff); /* Clear ISR, clear to stop mrcmd */
+		dm9051_iow(db, DM9051_ISR, 0xff); /* ISR clear and to stop mrcmd */
 
 		skb->protocol = eth_type_trans(skb, db->ndev);
 		if (db->ndev->features & NETIF_F_RXCSUM)
@@ -624,7 +624,7 @@ static irqreturn_t dm9051_rx_threaded_irq(int irq, void *pw)
 	return IRQ_HANDLED;
 }
 
-static void int_tx_delay(struct work_struct *w)
+static void tx_delay(struct work_struct *w)
 {
 	struct delayed_work *dw = to_delayed_work(w);
 	struct board_info *db = container_of(dw, struct board_info, tx_work);
@@ -636,7 +636,7 @@ static void int_tx_delay(struct work_struct *w)
 	mutex_unlock(&db->spi_lock); /* mutex essential */
 }
 
-static void int_rxctl_delay(struct work_struct *w)
+static void rxctl_delay(struct work_struct *w)
 {
 	struct delayed_work *dw = to_delayed_work(w);
 	struct board_info *db = container_of(dw, struct board_info, rxctrl_work);
@@ -672,8 +672,8 @@ static void dm9051_control_init(struct board_info *db)
 {
 	mutex_init(&db->spi_lock);
 	mutex_init(&db->addr_lock);
-	INIT_DELAYED_WORK(&db->rxctrl_work, int_rxctl_delay);
-	INIT_DELAYED_WORK(&db->tx_work, int_tx_delay);
+	INIT_DELAYED_WORK(&db->rxctrl_work, rxctl_delay);
+	INIT_DELAYED_WORK(&db->tx_work, tx_delay);
 }
 
 static inline void dm9051_phyup_lock(struct board_info *db)
@@ -826,7 +826,7 @@ static void dm9051_set_multicast_list_schedule(struct net_device *ndev)
 
 	/* the multicast address in Hash Table : 64 bits */
 	netdev_for_each_mc_addr(ha, ndev) {
-		hash_val = ether_crc_le(6, ha->addr) & 0x3f;
+		hash_val = ether_crc_le(ETH_ALEN, ha->addr) & 0x3f;
 		db->hash_table[hash_val / 16] |= (u16)1 << (hash_val % 16);
 	}
 

@@ -90,7 +90,7 @@
 #define FCR_TXPEN		BIT(5)
 #define FCR_BKPM		BIT(3)
 #define FCR_FLCE		BIT(0)
-#define FCR_FLOW_ENABLE		(FCR_TXPEN | FCR_BKPM | FCR_FLCE)
+#define FCR_RXTX_ENABLE		(FCR_TXPEN | FCR_BKPM | FCR_FLCE)
 /* 0x0B */
 #define EPCR_WEP		BIT(4)
 #define EPCR_EPOS		BIT(3)
@@ -149,8 +149,8 @@ static inline struct board_info *to_dm9051_board(struct net_device *ndev)
 /* structure definitions
  */
 struct rx_ctl_mach {
+	u16				status_err_counter;  /* The error of 'Status Err' */
 	u16				large_err_counter;  /* The error of 'Large Err' */
-	u16				mac_ovrsft_counter;  /* The error of 'MacOvrSft_Er' */
 	u16				DO_FIFO_RST_counter; /* The counter of 'fifo_reset' */
 };
 
@@ -166,7 +166,7 @@ struct board_info {
 	struct spi_message		spi_msg2 ____cacheline_aligned;
 	struct rx_ctl_mach		bc ____cacheline_aligned;
 	struct ethtool_pauseparam 	eth_pause ____cacheline_aligned;
-	struct dm9051_rxhdr		*prxhdr ____cacheline_aligned;
+	struct dm9051_rxhdr		eth_rxhdr ____cacheline_aligned;
 	struct spi_device		*spidev;
 	struct net_device		*ndev;
 	struct mii_bus			*mdiobus;
