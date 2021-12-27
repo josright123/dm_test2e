@@ -26,18 +26,13 @@
 
 #include "dm9051.h"
 
-static int msg_enable = NETIF_MSG_PROBE |
-			NETIF_MSG_LINK |
-			NETIF_MSG_IFDOWN |
-			NETIF_MSG_IFUP |
-			NETIF_MSG_RX_ERR |
-			NETIF_MSG_TX_ERR;
-
-module_param(msg_enable, int, 0);
-MODULE_PARM_DESC(msg_enable, "Message mask bitmapped");
+#define	dm9051_inb(db, reg, prxb)	dm9051_xfer(db, DM_SPI_RD | reg, NULL, prxb, 1)
+#define	dm9051_outb(db, reg, ptxb)	dm9051_xfer(db, DM_SPI_WR | reg, ptxb, NULL, 1)
+#define	dm9051_inblk(db, buff, len)	dm9051_xfer(db, DM_SPI_RD | DM_SPI_MRCMD, NULL, buff, len)
+#define	dm9051_outblk(db, buff, len)	dm9051_xfer(db, DM_SPI_WR | DM_SPI_MWCMD, buff, NULL, len)
 
 /* spi low level code */
-static inline int dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, unsigned int len)
+static int dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, unsigned int len)
 {
 	struct device *dev = &db->spidev->dev;
 	int ret;
@@ -46,60 +41,53 @@ static inline int dm9051_xfer(struct board_info *db, u8 cmd, u8 *txb, u8 *rxb, u
 	db->spi_xfer2[0].tx_buf = &db->cmd[0];
 	db->spi_xfer2[0].rx_buf = NULL;
 	db->spi_xfer2[0].len = 1;
-	if (!rxb) {
-		db->spi_xfer2[1].tx_buf = txb;
-		db->spi_xfer2[1].rx_buf = NULL;
-		db->spi_xfer2[1].len = len;
-	} else {
-		db->spi_xfer2[1].tx_buf = txb;
-		db->spi_xfer2[1].rx_buf = rxb;
-		db->spi_xfer2[1].len = len;
-	}
+	db->spi_xfer2[1].tx_buf = txb;
+	db->spi_xfer2[1].rx_buf = rxb;
+	db->spi_xfer2[1].len = len;
 	ret = spi_sync(db->spidev, &db->spi_msg);
 	if (ret < 0)
 		dev_err(dev, "spi burst cmd 0x%02x, ret=%d\n", cmd, ret);
 	return ret;
 }
 
-static u8 dm9051_ior(struct board_info *db, unsigned int reg)
+static u8 dm9051_getreg(struct board_info *db, unsigned int reg)
 {
 	int ret;
 	u8 rxb[1];
 
-	ret = dm9051_xfer(db, DM_SPI_RD | reg, NULL, rxb, 1);
-	if (ret < 0)
-		return 0xff;
+	ret = dm9051_inb(db, reg, rxb);
+	if (ret < 0) {
+		if (reg == DM9051_NSR)
+			return NSR_TX2END | NSR_TX1END;
+		if (reg == DM9051_EPCR)
+			return (u8)(~EPCR_ERRE);
+		return 0;
+	}
 	return rxb[0];
 }
 
-static void dm9051_iow(struct board_info *db, unsigned int reg, unsigned int val)
+static int dm9051_ior(struct board_info *db, unsigned int reg, u8 *prxb)
 {
-	u8 txb[1];
-
-	txb[0] = val;
-	dm9051_xfer(db, DM_SPI_WR | reg, txb, NULL, 1);
+	return dm9051_inb(db, reg, prxb);
 }
 
-static int dm9051_inblk(struct board_info *db, u8 *buff, unsigned int len)
+static int dm9051_iow(struct board_info *db, unsigned int reg, unsigned int val)
+{
+	u8 txb = val;
+
+	return dm9051_outb(db, reg, &txb);
+}
+
+static int dm9051_dumpblk(struct board_info *db, unsigned int len)
 {
 	int ret;
-	u8 txb[1];
+	u8 rxb[1];
 
-	ret = dm9051_xfer(db, DM_SPI_RD | DM_SPI_MRCMD, txb, buff, len);
-	return ret;
-}
-
-static void dm9051_dumpblk(struct board_info *db, unsigned int len)
-{
-	while (len--)
-		dm9051_ior(db, DM_SPI_MRCMD);
-}
-
-static int dm9051_outblk(struct board_info *db, u8 *buff, unsigned int len)
-{
-	int ret;
-
-	ret = dm9051_xfer(db, DM_SPI_WR | DM_SPI_MWCMD, buff, NULL, len);
+	while (len--) {
+		ret = dm9051_inb(db, DM_SPI_MRCMD, rxb);
+		if (ret < 0)
+			return ret;
+	}
 	return ret;
 }
 
@@ -107,17 +95,20 @@ static int dm9051_phy_read(struct board_info *db, int reg, int *pvalue)
 {
 	int ret;
 	u8 check_val;
+	u8 eph, epl;
 
 	dm9051_iow(db, DM9051_EPAR, DM9051_PHY | reg);
 	dm9051_iow(db, DM9051_EPCR, EPCR_ERPRR | EPCR_EPOS);
-	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0x0);
 	if (ret) {
 		netdev_err(db->ndev, "timeout read phy register\n");
 		return -ETIMEDOUT;
 	}
-	*pvalue = (dm9051_ior(db, DM9051_EPDRH) << 8) | dm9051_ior(db, DM9051_EPDRL);
+	dm9051_ior(db, DM9051_EPDRH, &eph);
+	dm9051_ior(db, DM9051_EPDRL, &epl);
+	*pvalue = (eph << 8) | epl;
 	return ret;
 }
 
@@ -130,7 +121,7 @@ static int dm9051_phy_write(struct board_info *db, int reg, int value)
 	dm9051_iow(db, DM9051_EPDRL, value);
 	dm9051_iow(db, DM9051_EPDRH, value >> 8);
 	dm9051_iow(db, DM9051_EPCR, EPCR_EPOS | EPCR_ERPRW);
-	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0x0);
 
@@ -154,12 +145,12 @@ static void dm9051_read_eeprom(struct board_info *db, int offset, u8 *to)
 	mutex_lock(&db->addr_lock);
 	dm9051_iow(db, DM9051_EPAR, offset);
 	dm9051_iow(db, DM9051_EPCR, EPCR_ERPRR);
-	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0x0);
 	if (!ret) {
-		to[0] = dm9051_ior(db, DM9051_EPDRL);
-		to[1] = dm9051_ior(db, DM9051_EPDRH);
+		dm9051_ior(db, DM9051_EPDRL, &to[0]);
+		dm9051_ior(db, DM9051_EPDRH, &to[1]);
 	} else {
 		to[0] = DM9051_EEPROM_NULLVALUE & 0xff;
 		to[1] = DM9051_EEPROM_NULLVALUE >> 8;
@@ -180,7 +171,7 @@ static void dm9051_write_eeprom(struct board_info *db, int offset, u8 *data)
 	dm9051_iow(db, DM9051_EPDRH, data[1]);
 	dm9051_iow(db, DM9051_EPDRL, data[0]);
 	dm9051_iow(db, DM9051_EPCR, EPCR_WEP | EPCR_ERPRW);
-	ret = read_poll_timeout(dm9051_ior, check_val, !(check_val & EPCR_ERRE), 100, 10000,
+	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
 	dm9051_iow(db, DM9051_EPCR, 0);
 	if (ret)
@@ -225,10 +216,13 @@ static int dm9051_mdio_write(struct mii_bus *mdiobus, int phy_id, int reg, u16 v
 static unsigned int dm9051_chipid(struct board_info *db)
 {
 	struct device *dev = &db->spidev->dev;
-	unsigned int id;
+	u8 pidh, pidl;
+	u16 id;
 
-	id = (unsigned int)dm9051_ior(db, DM9051_PIDH) << 8;
-	id |= dm9051_ior(db, DM9051_PIDL);
+	dm9051_ior(db, DM9051_PIDH, &pidh);
+	dm9051_ior(db, DM9051_PIDL, &pidl);
+	id = (pidh << 8) | pidl;
+
 	if (id == DM9051_ID) {
 		dev_info(dev, "chip %04x found !\n", id);
 		return id;
@@ -260,7 +254,7 @@ static void dm9051_handle_link_change(struct net_device *ndev)
 {
 	struct board_info *db = to_dm9051_board(ndev);
 	int lcl_adv, rmt_adv;
-	u8 fcr = 0;
+	u8 nfcr, fcr = 0;
 
 	phy_print_status(ndev->phydev);
 
@@ -286,7 +280,8 @@ static void dm9051_handle_link_change(struct net_device *ndev)
 
 		/* to change if get new fcr */
 		mutex_lock(&db->addr_lock);
-		if (dm9051_ior(db, DM9051_FCR) != fcr)
+		dm9051_ior(db, DM9051_FCR, &nfcr);
+		if (nfcr != fcr)
 			dm9051_iow(db, DM9051_FCR, fcr); /* on link change */
 		mutex_unlock(&db->addr_lock);
 	}
@@ -331,7 +326,7 @@ static void dm9051_init_mac_addr(struct net_device *ndev, struct board_info *db)
 	int i;
 
 	for (i = 0; i < ETH_ALEN; i++)
-		addr[i] = dm9051_ior(db, DM9051_PAR + i);
+		dm9051_ior(db, DM9051_PAR + i, &addr[i]);
 
 	if (is_valid_ether_addr(addr)) {
 		memcpy(ndev->dev_addr, addr, 6); //eth_hw_addr_set(ndev, addr);
@@ -418,7 +413,7 @@ static int dm9051_set_pauseparam(struct net_device *ndev,
 				 struct ethtool_pauseparam *pause)
 {
 	struct board_info *db = to_dm9051_board(ndev);
-	u8 fcr = 0;
+	u8 nfcr, fcr = 0;
 
 	db->eth_pause = *pause;
 
@@ -433,7 +428,8 @@ static int dm9051_set_pauseparam(struct net_device *ndev,
 		fcr |= FCR_TXPEN;
 
 	mutex_lock(&db->addr_lock);
-	if (dm9051_ior(db, DM9051_FCR) != fcr)
+	dm9051_ior(db, DM9051_FCR, &nfcr);
+	if (nfcr != fcr)
 		dm9051_iow(db, DM9051_FCR, fcr); /* on set pause param */
 	mutex_unlock(&db->addr_lock);
 
@@ -510,8 +506,8 @@ static int dm9051_loop_rx(struct board_info *db)
 	int scanrr = 0;
 
 	while (1) {
-		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
-		rxbyte = dm9051_ior(db, DM_SPI_MRCMDX); /* Dummy read */
+		dm9051_ior(db, DM_SPI_MRCMDX, &rxbyte); /* Dummy read */
+		dm9051_ior(db, DM_SPI_MRCMDX, &rxbyte); /* Dummy read */
 		if (rxbyte != DM9051_PKT_RDY)
 			break; /* exhaust-empty */
 
@@ -568,14 +564,16 @@ static int dm9051_single_tx(struct board_info *db, u8 *buff, unsigned int len)
 	u8 check_val;
 
 	/* shorter by waiting tx-end rather than tx-req */
-	ret = read_poll_timeout(dm9051_ior, check_val, check_val & (NSR_TX2END | NSR_TX1END),
+	ret = read_poll_timeout(dm9051_getreg, check_val, check_val & (NSR_TX2END | NSR_TX1END),
 				1, 20, false, db, DM9051_NSR);
 	if (ret) {
 		netdev_err(db->ndev, "timeout transmit packet\n");
 		return -ETIMEDOUT;
 	}
 
-	dm9051_outblk(db, buff, len);
+	ret = dm9051_outblk(db, buff, len);
+	if (ret < 0)
+		return ret;
 	dm9051_iow(db, DM9051_TXPLL, len);
 	dm9051_iow(db, DM9051_TXPLH, len >> 8);
 	dm9051_iow(db, DM9051_TCR, TCR_TXREQ);
@@ -942,7 +940,7 @@ static int dm9051_probe(struct spi_device *spi)
 	SET_NETDEV_DEV(ndev, dev);
 	dev_set_drvdata(dev, ndev);
 	db = netdev_priv(ndev);
-	db->msg_enable = msg_enable;
+	db->msg_enable = 0;
 	db->spidev = spi;
 	db->ndev = ndev;
 	dm9051_netdev(ndev);
