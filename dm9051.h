@@ -177,7 +177,7 @@ struct board_info {
 	struct delayed_work		tx_work;
 	struct rx_ctl_mach		bc;
 	struct dm9051_rxhdr		eth_rxhdr;
-	struct ethtool_pauseparam 	eth_pause;
+	struct ethtool_pauseparam	eth_pause;
 	u32				msg_enable;
 	u16				hash_table[4];
 	u8				imr_all;

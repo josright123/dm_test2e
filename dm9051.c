@@ -272,7 +272,6 @@ static void dm9051_handle_link_change(struct net_device *ndev)
 			lcl_adv = linkmode_adv_to_mii_adv_t(db->phydev->advertising);
 			rmt_adv = linkmode_adv_to_mii_adv_t(db->phydev->lp_advertising);
 
-			netdev_info(ndev, "%04x/%04x(rmt)\n", lcl_adv, rmt_adv); //netdev_dbg(ndev, "localadv %04x & remoteadv %04x\n", lcl_adv, rmt_adv);
 			if (lcl_adv & rmt_adv & ADVERTISE_PAUSE_CAP) {
 				db->eth_pause.rx_pause = true;
 				db->eth_pause.tx_pause = true;
@@ -742,7 +741,6 @@ static int dm9051_open(struct net_device *ndev)
 
 	netif_wake_queue(ndev);
 
-	netdev_dbg(ndev, "[dm9051_open] %pM irq_no %d ACTIVE_LOW\n", ndev->dev_addr, spi->irq);
 	ndev->irq = spi->irq; /* by dts */
 	ret = request_threaded_irq(spi->irq, NULL, dm9051_rx_threaded_irq,
 				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
