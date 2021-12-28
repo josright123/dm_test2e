@@ -101,11 +101,11 @@ static int dm9051_phy_read(struct board_info *db, int reg, int *pvalue)
 	dm9051_iow(db, DM9051_EPCR, EPCR_ERPRR | EPCR_EPOS);
 	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
-	dm9051_iow(db, DM9051_EPCR, 0x0);
 	if (ret) {
 		netdev_err(db->ndev, "timeout read phy register\n");
-		return -ETIMEDOUT;
+		return ret;
 	}
+	dm9051_iow(db, DM9051_EPCR, 0x0);
 	dm9051_ior(db, DM9051_EPDRH, &eph);
 	dm9051_ior(db, DM9051_EPDRL, &epl);
 	*pvalue = (eph << 8) | epl;
@@ -123,60 +123,58 @@ static int dm9051_phy_write(struct board_info *db, int reg, int value)
 	dm9051_iow(db, DM9051_EPCR, EPCR_EPOS | EPCR_ERPRW);
 	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
+	if (ret) {
+		netdev_err(db->ndev, "timeout write phy register\n");
+		return ret;
+	}
 	dm9051_iow(db, DM9051_EPCR, 0x0);
 
 	if (reg == MII_BMCR && !(value & 0x0800))
 		mdelay(1); /* need for if activate phyxcer */
 
-	if (ret) {
-		netdev_err(db->ndev, "timeout write phy register\n");
-		return -ETIMEDOUT;
-	}
 	return ret;
 }
 
 /* Read a word data from SROM
  */
-static void dm9051_read_eeprom(struct board_info *db, int offset, u8 *to)
+static int dm9051_read_eeprom(struct board_info *db, int offset, u8 *to)
 {
 	int ret;
 	u8 check_val;
 
-	mutex_lock(&db->addr_lock);
 	dm9051_iow(db, DM9051_EPAR, offset);
 	dm9051_iow(db, DM9051_EPCR, EPCR_ERPRR);
 	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
-	dm9051_iow(db, DM9051_EPCR, 0x0);
-	if (!ret) {
-		dm9051_ior(db, DM9051_EPDRL, &to[0]);
-		dm9051_ior(db, DM9051_EPDRH, &to[1]);
-	} else {
-		to[0] = DM9051_EEPROM_NULLVALUE & 0xff;
-		to[1] = DM9051_EEPROM_NULLVALUE >> 8;
+	if (ret) {
 		netdev_err(db->ndev, "timeout read eeprom\n");
+		return ret;
 	}
-	mutex_unlock(&db->addr_lock);
+	dm9051_iow(db, DM9051_EPCR, 0x0);
+	dm9051_ior(db, DM9051_EPDRL, &to[0]);
+	dm9051_ior(db, DM9051_EPDRH, &to[1]);
+	return 0;
 }
 
 /* Write a word data to SROM
  */
-static void dm9051_write_eeprom(struct board_info *db, int offset, u8 *data)
+static int dm9051_write_eeprom(struct board_info *db, int offset, u8 *data)
 {
 	int ret;
 	u8 check_val;
 
-	mutex_lock(&db->addr_lock);
 	dm9051_iow(db, DM9051_EPAR, offset);
 	dm9051_iow(db, DM9051_EPDRH, data[1]);
 	dm9051_iow(db, DM9051_EPDRL, data[0]);
 	dm9051_iow(db, DM9051_EPCR, EPCR_WEP | EPCR_ERPRW);
 	ret = read_poll_timeout(dm9051_getreg, check_val, !(check_val & EPCR_ERRE), 100, 10000,
 				true, db, DM9051_EPCR);
-	dm9051_iow(db, DM9051_EPCR, 0);
-	if (ret)
+	if (ret) {
 		netdev_err(db->ndev, "timeout write eeprom\n");
-	mutex_unlock(&db->addr_lock);
+		return ret;
+	}
+	dm9051_iow(db, DM9051_EPCR, 0);
+	return ret;
 }
 
 static int dm9051_mdio_read(struct mii_bus *mdiobus, int phy_id, int reg)
@@ -370,16 +368,21 @@ static int dm9051_get_eeprom(struct net_device *ndev,
 	struct board_info *db = to_dm9051_board(ndev);
 	int offset = ee->offset;
 	int len = ee->len;
-	int i;
+	int i, ret;
 
 	if ((len & 1) != 0 || (offset & 1) != 0)
 		return -EINVAL;
 
 	ee->magic = DM_EEPROM_MAGIC;
 
-	for (i = 0; i < len; i += 2)
-		dm9051_read_eeprom(db, (offset + i) / 2, data + i);
-	return 0;
+	mutex_lock(&db->addr_lock);
+	for (i = 0; i < len; i += 2) {
+		ret = dm9051_read_eeprom(db, (offset + i) / 2, data + i);
+		if (ret)
+			break;
+	}
+	mutex_unlock(&db->addr_lock);
+	return ret;
 }
 
 static int dm9051_set_eeprom(struct net_device *ndev,
@@ -388,7 +391,7 @@ static int dm9051_set_eeprom(struct net_device *ndev,
 	struct board_info *db = to_dm9051_board(ndev);
 	int offset = ee->offset;
 	int len = ee->len;
-	int i;
+	int i, ret;
 
 	if ((len & 1) != 0 || (offset & 1) != 0)
 		return -EINVAL;
@@ -396,9 +399,14 @@ static int dm9051_set_eeprom(struct net_device *ndev,
 	if (ee->magic != DM_EEPROM_MAGIC)
 		return -EINVAL;
 
-	for (i = 0; i < len; i += 2)
-		dm9051_write_eeprom(db, (offset + i) / 2, data + i);
-	return 0;
+	mutex_lock(&db->addr_lock);
+	for (i = 0; i < len; i += 2) {
+		ret = dm9051_write_eeprom(db, (offset + i) / 2, data + i);
+		if (ret)
+			break;
+	}
+	mutex_unlock(&db->addr_lock);
+	return ret;
 }
 
 static void dm9051_get_pauseparam(struct net_device *ndev,
@@ -506,8 +514,8 @@ static int dm9051_loop_rx(struct board_info *db)
 	int scanrr = 0;
 
 	while (1) {
-		dm9051_ior(db, DM_SPI_MRCMDX, &rxbyte); /* Dummy read */
-		dm9051_ior(db, DM_SPI_MRCMDX, &rxbyte); /* Dummy read */
+		dm9051_ior(db, DM_SPI_MRCMDX, &rxbyte); /* dummy read */
+		dm9051_ior(db, DM_SPI_MRCMDX, &rxbyte); /* dummy read */
 		if (rxbyte != DM9051_PKT_RDY)
 			break; /* exhaust-empty */
 
@@ -529,11 +537,13 @@ static int dm9051_loop_rx(struct board_info *db)
 
 		skb = dev_alloc_skb(rxlen);
 		if (!skb) {
-			dm9051_dumpblk(db, rxlen);
+			ret = dm9051_dumpblk(db, rxlen);
+			if (ret < 0)
+				return -EBUSY;
 			return scanrr;
 		}
-		rdptr = (u8 *)skb_put(skb, rxlen - 4);
 
+		rdptr = (u8 *)skb_put(skb, rxlen - 4);
 		ret = dm9051_inblk(db, rdptr, rxlen);
 		if (ret < 0) {
 			dev_kfree_skb(skb);
