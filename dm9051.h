@@ -150,9 +150,9 @@ static inline struct board_info *to_dm9051_board(struct net_device *ndev)
 /* structure definitions
  */
 struct rx_ctl_mach {
-	u16				status_err_counter;  /* The error of 'Status Err' */
-	u16				large_err_counter;  /* The error of 'Large Err' */
-	u16				DO_FIFO_RST_counter; /* The counter of 'fifo_reset' */
+	u16				status_err_counter;  /* 'Status Err' counter */
+	u16				large_err_counter;  /* 'Large Err' counter */
+	u16				DO_FIFO_RST_counter; /* 'fifo_reset' counter */
 };
 
 struct dm9051_rxhdr {
