@@ -3,8 +3,8 @@
  * Copyright 2021 Davicom Semiconductor,Inc.
  *	http://www.davicom.com.tw
  *	2014/03/11  Joseph CHANG  v1.0  Create
- *	2021/08/09  Joseph CHANG  v5.0  Annourence
  *	2021/10/26  Joseph CHANG  v5.0.1  Update
+ *	2021/12/09  Joseph CHANG  v5.0.5  Update
  *
  * DM9051 register definitions
  *
@@ -17,7 +17,7 @@
 
 #define DRVNAME_9051		"dm9051"
 
-#define DM9051_ID		0x90510A46
+#define DM9051_ID		0x9051
 
 #define DM9051_NCR		0x00
 #define DM9051_NSR		0x01
@@ -151,7 +151,7 @@
  */
 static int dm9051_open(struct net_device *dev);
 static int dm9051_stop(struct net_device *dev);
-static netdev_tx_t DM9051_START_XMIT(struct sk_buff *skb, struct net_device *dev);
+static netdev_tx_t dm9051_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void dm9051_set_multicast_list_schedule(struct net_device *dev);
 static int dm9051_set_mac_address(struct net_device *dev, void *p);
 
@@ -160,10 +160,10 @@ static inline struct board_info *to_dm9051_board(struct net_device *dev)
 	return netdev_priv(dev);
 }
 
-#define DM_DM_CONF_DTS_COMPATIBLE_USAGE		"davicom,dm9051"
-#define GPIO_ANY_GPIO_DESC			"processer_int_pin"
+/* Driver information
+ */
 #define DM_VERSION(a, b, c)			\
-	(((a) << 16) + ((b) << 8) + (c))	/* Driver information */
+	(((a) << 16) + ((b) << 8) + (c))
 
 /* carrier
  */
@@ -173,20 +173,9 @@ static inline struct board_info *to_dm9051_board(struct net_device *dev)
 
 /* xmit support
  */
-#define	sk_buff_head_init(db)			skb_queue_head_init(&(db)->txq)
-#define	sk_buff_get(db)				skb_dequeue(&(db)->txq)
-#define	sk_buff_set(db, skb)			skb_queue_tail(&(db)->txq, skb)
-
-/* mutex
- */
-#define DLYWORK_MUTEX_HEAD_ESSENTIAL(db)	mutex_lock(&(db)->spi_lock)
-#define DLYWORK_MUTEX_TAIL_ESSENTIAL(db)	mutex_unlock(&(db)->spi_lock)
-#define DLYWORK_MUTEX_HEAD_OPT_PCS(db)
-#define DLYWORK_MUTEX_TAIL_OPT_PCS(db)
-#define ADDR_LOCK_HEAD_ESSENTIAL(db)		mutex_lock(&(db)->addr_lock)
-#define ADDR_LOCK_TAIL_ESSENTIAL(db)		mutex_unlock(&(db)->addr_lock)
-#define ADDR_LOCK_HEAD_OPT_PCS(db)
-#define ADDR_LOCK_TAIL_OPT_PCS(db)
+#define	dm_sk_buff_head_init(db)		skb_queue_head_init(&(db)->txq)
+#define	dm_sk_buff_get(db)			skb_dequeue(&(db)->txq)
+#define	dm_sk_buff_set(db, skb)			skb_queue_tail(&(db)->txq, skb)
 
 /* spi transfers
  */
@@ -228,21 +217,12 @@ struct dm9051_rxhdr {
 	__le16				rxlen;
 };
 
-struct dm_userprint {
-	struct dm_ecarr {
-		int			linkBool;
-	} ec;
-};
-
 struct board_info {
 	u8				cmd[2] ____cacheline_aligned;
 	struct spi_transfer		spi_xfer2[2] ____cacheline_aligned;
 	struct spi_message		spi_msg2 ____cacheline_aligned;
 	struct rx_ctl_mach		bc ____cacheline_aligned;
 	struct dm9051_rxhdr		*prxhdr ____cacheline_aligned;
-//.#if CONF_VER & DM_VER_DEBUG
-	struct dm_userprint		p  ____cacheline_aligned;
-//.#endif
 	struct spi_device		*spidev;
 	struct net_device		*ndev;
 	struct mii_if_info		mii;
@@ -263,6 +243,6 @@ struct board_info {
 	char				DRV_VERSION[50];
 };
 
-#define	RXHDR_SIZE	sizeof(struct dm9051_rxhdr)
+#define	DM_RXHDR_SIZE			sizeof(struct dm9051_rxhdr)
 
 #endif /* _DM9051_H_ */
